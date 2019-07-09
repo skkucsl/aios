@@ -18,6 +18,9 @@
 #include <linux/backing-dev.h>
 #include "internal.h"
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/aios_breakdown.h>
+
 #define VALID_FLAGS (SYNC_FILE_RANGE_WAIT_BEFORE|SYNC_FILE_RANGE_WRITE| \
 			SYNC_FILE_RANGE_WAIT_AFTER)
 
@@ -194,6 +197,13 @@ int vfs_fsync_range(struct file *file, loff_t start, loff_t end, int datasync)
 		return -EINVAL;
 	if (!datasync && (inode->i_state & I_DIRTY_TIME))
 		mark_inode_dirty_sync(inode);
+
+#ifdef CONFIG_AIOS
+	if (file->f_flags & O_AIOS && file->f_op->AIOS_fsync)
+		return file->f_op->AIOS_fsync(file, start, end, datasync);
+	else
+		return file->f_op->fsync(file, start, end, datasync);
+#endif
 	return file->f_op->fsync(file, start, end, datasync);
 }
 EXPORT_SYMBOL(vfs_fsync_range);
@@ -221,6 +231,7 @@ static int do_fsync(unsigned int fd, int datasync)
 		ret = vfs_fsync(f.file, datasync);
 		fdput(f);
 	}
+
 	return ret;
 }
 

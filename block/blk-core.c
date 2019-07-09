@@ -35,6 +35,7 @@
 #include <linux/blk-cgroup.h>
 #include <linux/debugfs.h>
 #include <linux/bpf.h>
+#include <linux/lbio.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/block.h>
@@ -1715,6 +1716,7 @@ void blk_start_plug(struct blk_plug *plug)
 		return;
 
 	INIT_LIST_HEAD(&plug->mq_list);
+	INIT_LIST_HEAD(&plug->lbio_list);
 	INIT_LIST_HEAD(&plug->cb_list);
 	plug->rq_count = 0;
 	plug->multiple_queues = false;
@@ -1769,10 +1771,33 @@ struct blk_plug_cb *blk_check_plugged(blk_plug_cb_fn unplug, void *data,
 }
 EXPORT_SYMBOL(blk_check_plugged);
 
+#ifdef CONFIG_AIOS
+void lbio_flush_plug_list(struct blk_plug *plug)
+{
+	struct lbio *lbio;
+	LIST_HEAD(lbio_list);
+
+	list_splice_init(&plug->lbio_list, &lbio_list);
+
+	while (!list_empty(&lbio_list)) {
+		lbio = list_entry(lbio_list.next, struct lbio, list);
+		list_del_init(&lbio->list);
+		if (lbio_is_write(lbio))
+			nvme_AIOS_write(lbio);
+		else
+			nvme_AIOS_read(lbio);
+	}
+}
+#endif
+
 void blk_flush_plug_list(struct blk_plug *plug, bool from_schedule)
 {
 	flush_plug_callbacks(plug, from_schedule);
 
+#ifdef CONFIG_AIOS
+	if (!list_empty(&plug->lbio_list))
+		lbio_flush_plug_list(plug);
+#endif
 	if (!list_empty(&plug->mq_list))
 		blk_mq_flush_plug_list(plug, from_schedule);
 }

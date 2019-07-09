@@ -378,6 +378,48 @@ static int filemap_check_and_keep_errors(struct address_space *mapping)
 	return 0;
 }
 
+/*
+int __filemap_lbio_fdatawrite_range(struct address_space *mapping, loff_t start,
+				loff_t end, int sync_mode)
+{
+	int ret;
+	struct writeback_control wbc = {
+		.sync_mode = sync_mode,
+		.nr_to_write = LONG_MAX,
+		.range_start = start,
+		.range_end = end,
+	};
+
+	if (!mapping_cap_writeback_dirty(mapping))
+		return 0;
+
+	wbc_attach_fdatawrite_inode(&wbc, mapping->host);
+	//ret = do_writepages(mapping, &wbc);
+	if (wbc.nr_to_write <= 0)
+		return 0;
+	while (1) {
+		//if (atomic_read(&mapping->host->aios_count)) {
+		//	if (mapping->a_ops->lbio_writepages) {
+		//		ret = mapping->a_ops->writepages(mapping, wbc);
+		//		goto lbio_writepages_ok;
+		//	}
+		//}
+
+		if (mapping->a_ops->lbio_writepages)
+			ret = mapping->a_ops->lbio_writepages(mapping, &wbc);
+		else
+			ret = generic_writepages(mapping, &wbc);
+//lbio_writepages_ok:
+		if ((ret != -ENOMEM) || (wbc.sync_mode != WB_SYNC_ALL))
+			break;
+		cond_resched();
+		congestion_wait(BLK_RW_ASYNC, HZ/50);
+	}
+	wbc_detach_inode(&wbc);
+	return ret;
+}
+*/
+
 /**
  * __filemap_fdatawrite_range - start writeback on mapping dirty pages in range
  * @mapping:	address space structure to write
@@ -707,6 +749,25 @@ int file_check_and_advance_wb_err(struct file *file)
 }
 EXPORT_SYMBOL(file_check_and_advance_wb_err);
 
+int file_write_range(struct file *file, loff_t lstart, loff_t lend)
+{
+	int err = 0, err2;
+	struct address_space *mapping = file->f_mapping;
+
+	if (mapping_needs_writeback(mapping)) {
+		err = __filemap_fdatawrite_range(mapping, lstart, lend,
+						 WB_SYNC_ALL);
+		/* See comment of filemap_write_and_wait() */
+		if (err == -EIO)
+			printk(KERN_ERR "[AIOS ERROR] %s:%d\n", __func__, __LINE__);
+	}
+	err2 = file_check_and_advance_wb_err(file);
+	if (!err)
+		err = err2;
+	return err;
+}
+EXPORT_SYMBOL(file_write_range);
+
 /**
  * file_write_and_wait_range - write out & wait on a file range
  * @file:	file pointing to address_space with pages
@@ -793,6 +854,72 @@ int replace_page_cache_page(struct page *old, struct page *new, gfp_t gfp_mask)
 }
 EXPORT_SYMBOL_GPL(replace_page_cache_page);
 
+static int __add_to_page_cache_nolocked(struct page *page,
+				      struct address_space *mapping,
+				      pgoff_t offset, gfp_t gfp_mask,
+				      void **shadowp)
+{
+	XA_STATE(xas, &mapping->i_pages, offset);
+	int huge = PageHuge(page);
+	struct mem_cgroup *memcg;
+	int error;
+	void *old;
+
+	VM_BUG_ON_PAGE(PageSwapBacked(page), page);
+	mapping_set_update(&xas, mapping);
+
+	if (!huge) {
+		error = mem_cgroup_try_charge(page, current->mm,
+					      gfp_mask, &memcg, false);
+		if (error)
+			return error;
+	}
+
+	get_page(page);
+	page->mapping = mapping;
+	page->index = offset;
+
+	do {
+		xas_lock_irq(&xas);
+		old = xas_load(&xas);
+		if (old && !xa_is_value(old)) {
+			xas_set_err(&xas, -EEXIST);
+			goto unlock;
+		}
+		xas_store(&xas, page);
+		if (xas_error(&xas))
+			goto unlock;
+
+		if (xa_is_value(old)) {
+			mapping->nrexceptional--;
+			if (shadowp)
+				*shadowp = old;
+		}
+		mapping->nrpages++;
+
+		/* hugetlb pages do not participate in page cache accounting */
+		if (!huge)
+			__inc_node_page_state(page, NR_FILE_PAGES);
+unlock:
+		xas_unlock_irq(&xas);
+	} while (xas_nomem(&xas, gfp_mask & GFP_RECLAIM_MASK));
+
+	if (xas_error(&xas))
+		goto error;
+
+	if (!huge)
+		mem_cgroup_commit_charge(page, memcg, false, false);
+	trace_mm_filemap_add_to_page_cache(page);
+	return 0;
+error:
+	page->mapping = NULL;
+	/* Leave page->index set: truncation relies upon it */
+	if (!huge)
+		mem_cgroup_cancel_charge(page, memcg, false);
+	put_page(page);
+	return xas_error(&xas);
+}
+
 static int __add_to_page_cache_locked(struct page *page,
 				      struct address_space *mapping,
 				      pgoff_t offset, gfp_t gfp_mask,
@@ -875,6 +1002,34 @@ int add_to_page_cache_locked(struct page *page, struct address_space *mapping,
 					  gfp_mask, NULL);
 }
 EXPORT_SYMBOL(add_to_page_cache_locked);
+
+int add_to_page_cache_lru_nolock(struct page *page, struct address_space *mapping,
+				pgoff_t offset, gfp_t gfp_mask)
+{
+	void *shadow = NULL;
+	int ret;
+
+	ret = __add_to_page_cache_nolocked(page, mapping, offset,
+					 gfp_mask, &shadow);
+	if (unlikely(ret)) {
+		return ret;
+	} else {
+		/*
+		 * The page might have been evicted from cache only
+		 * recently, in which case it should be activated like
+		 * any other repeatedly accessed page.
+		 * The exception is pages getting rewritten; evicting other
+		 * data from the working set, only to cache data that will
+		 * get overwritten with something else, is a waste of memory.
+		 */
+		WARN_ON_ONCE(PageActive(page));
+		if (!(gfp_mask & __GFP_WRITE) && shadow)
+			workingset_refault(page, shadow);
+		lru_cache_add(page);
+	}
+	return ret;
+}
+EXPORT_SYMBOL_GPL(add_to_page_cache_lru_nolock);
 
 int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 				pgoff_t offset, gfp_t gfp_mask)

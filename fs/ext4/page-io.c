@@ -25,6 +25,7 @@
 #include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/backing-dev.h>
+#include <linux/lbio.h>
 
 #include "ext4_jbd2.h"
 #include "xattr.h"
@@ -119,6 +120,67 @@ static void ext4_finish_bio(struct bio *bio)
 		}
 	}
 }
+
+#ifdef CONFIG_AIOS
+static void ext4_finish_lbio(struct lbio *lbio, blk_status_t status)
+{
+	int i;
+
+	for (i = 0; i < lbio->vcnt; ++i) {
+		struct lbio_vec *bv = &lbio->vec[i];
+		struct page *page = bv->page;
+#ifdef CONFIG_EXT4_FS_ENCRYPTION
+		struct page *data_page = NULL;
+#endif
+		struct buffer_head *bh, *head;
+		unsigned under_io = 0;
+		unsigned long flags;
+
+		if (!page)
+			continue;
+
+#ifdef CONFIG_EXT4_FS_ENCRYPTION
+		if (!page->mapping) {
+			/* The bounce data pages are unmapped. */
+			data_page = page;
+			fscrypt_pullback_bio_page(&page, false);
+		}
+#endif
+
+		if (status) {
+			SetPageError(page);
+			mapping_set_error(page->mapping, -EIO);
+		}
+		bh = head = page_buffers(page);
+		/*
+		 * We check all buffers in the page under BH_Uptodate_Lock
+		 * to avoid races with other end io clearing async_write flags
+		 */
+		local_irq_save(flags);
+		bit_spin_lock(BH_Uptodate_Lock, &head->b_state);
+		do {
+			if (bh_offset(bh) < 0 ||
+			    bh_offset(bh) + bh->b_size > PAGE_SIZE) {
+				if (buffer_async_write(bh))
+					under_io++;
+				continue;
+			}
+			clear_buffer_async_write(bh);
+			if (status)
+				buffer_io_error(bh);
+		} while ((bh = bh->b_this_page) != head);
+		bit_spin_unlock(BH_Uptodate_Lock, &head->b_state);
+		local_irq_restore(flags);
+		if (!under_io) {
+#ifdef CONFIG_EXT4_FS_ENCRYPTION
+			if (data_page)
+				fscrypt_restore_control_page(data_page);
+#endif
+			end_page_writeback(page);
+		}
+	}
+}
+#endif
 
 static void ext4_release_io_end(ext4_io_end_t *io_end)
 {
@@ -344,6 +406,62 @@ static void ext4_end_bio(struct bio *bio)
 	}
 }
 
+#ifdef CONFIG_AIOS
+static void ext4_end_lbio(struct lbio *lbio)
+{
+	ext4_io_end_t *io_end = lbio->bi_private;
+	sector_t sector = lbio->sector;
+	blk_status_t status = lbio->status;
+
+	if (WARN_ONCE(!io_end, "io_end is NULL: sector %Lu err %d\n",
+		      (long long) sector,
+		      status)) {
+		ext4_finish_lbio(lbio, status);
+		return;
+	}
+	lbio->bi_end_io = NULL;
+
+	if (status) {
+		struct inode *inode = io_end->inode;
+
+		ext4_warning(inode->i_sb, "I/O error %d writing to inode %lu "
+			     "(offset %llu size %ld starting block %llu)",
+			     status, inode->i_ino,
+			     (unsigned long long) io_end->offset,
+			     (long) io_end->size,
+			     (unsigned long long)
+			     sector >> (inode->i_blkbits - 9));
+		mapping_set_error(inode->i_mapping,
+				blk_status_to_errno(status));
+	}
+
+	if (io_end->flag & EXT4_IO_END_UNWRITTEN) {
+<<<<<<< HEAD
+=======
+		//bio->bi_private = xchg(&io_end->bio, bio);
+>>>>>>> 70721a85a2489683591d2143db970bfa8e6f4bab
+		printk(KERN_ERR "[AIOS ERROR] %s:%d\n", __func__, __LINE__);
+		ext4_put_io_end_defer(io_end);
+	} else {
+		ext4_put_io_end_defer(io_end);
+		ext4_finish_lbio(lbio, status);
+	}
+}
+#endif
+
+#ifdef CONFIG_AIOS
+void ext4_lbio_submit(struct ext4_io_submit *io)
+{
+	struct bio *bio = io->io_bio;
+
+	if (bio) {
+		struct lbio *lbio = (struct lbio *)bio;
+		list_add_tail(&lbio->list, &current->plug->lbio_list);
+	}
+	io->io_bio = NULL;
+}
+#endif
+
 void ext4_io_submit(struct ext4_io_submit *io)
 {
 	struct bio *bio = io->io_bio;
@@ -366,6 +484,37 @@ void ext4_io_submit_init(struct ext4_io_submit *io,
 	io->io_end = NULL;
 }
 
+#ifdef CONFIG_AIOS
+static int io_submit_init_lbio(struct ext4_io_submit *io,
+			      struct buffer_head *bh)
+{
+	struct lbio *lbio;
+
+	lbio = lbio_alloc(GFP_NOIO, BIO_MAX_PAGES);
+	if (!lbio) {
+		printk(KERN_ERR "[AIOS ERROR] %s:%d\n", __func__, __LINE__);
+		return -ENOMEM;
+	}
+	lbio->sector = bh->b_blocknr * (bh->b_size >> 9);
+	if (bh->b_bdev->bd_partno) {
+		struct hd_struct *p;
+		rcu_read_lock();
+		p = __disk_get_part(bh->b_bdev->bd_disk, bh->b_bdev->bd_partno);
+		lbio->sector += p->start_sect;
+		rcu_read_unlock();
+	}
+	lbio->bi_end_io = ext4_end_lbio;
+	lbio->bi_private = ext4_get_io_end(io->io_end);
+	lbio_set_write(lbio);
+
+	io->io_bio = (struct bio *)lbio;
+	io->last_lbio = lbio;
+	io->io_next_block = bh->b_blocknr;
+
+	return 0;
+}
+#endif
+
 static int io_submit_init_bio(struct ext4_io_submit *io,
 			      struct buffer_head *bh)
 {
@@ -383,6 +532,61 @@ static int io_submit_init_bio(struct ext4_io_submit *io,
 	wbc_init_bio(io->io_wbc, bio);
 	return 0;
 }
+
+#ifdef CONFIG_AIOS
+static int io_submit_add_new_lbio(struct ext4_io_submit *io,
+								struct buffer_head *bh)
+{
+	struct lbio *lbio = lbio_alloc(GFP_NOIO, BIO_MAX_PAGES);
+	if (!lbio) {
+		printk(KERN_ERR "[AIOS ERROR] %s:%d\n", __func__, __LINE__);
+		return -ENOMEM;
+	}
+	lbio->sector = bh->b_blocknr * (bh->b_size >> 9);
+	if (bh->b_bdev->bd_partno) {
+		struct hd_struct *p;
+		rcu_read_lock();
+		p = __disk_get_part(bh->b_bdev->bd_disk, bh->b_bdev->bd_partno);
+		lbio->sector += p->start_sect;
+		rcu_read_unlock();
+	}
+	lbio->bi_end_io = ext4_end_lbio;
+	lbio->bi_private = ext4_get_io_end(io->io_end);
+	lbio_set_write(lbio);
+
+	io->last_lbio->next = lbio;
+	io->last_lbio = lbio;
+	io->io_next_block = bh->b_blocknr;
+
+	return 0;
+}
+
+static int lbio_submit_add_bh(struct ext4_io_submit *io,
+			    struct inode *inode,
+			    struct page *page,
+			    struct buffer_head *bh)
+{
+	int ret;
+
+	if (io->io_bio && bh->b_blocknr != io->io_next_block) {
+		ext4_lbio_submit(io);
+	}
+	if (io->io_bio == NULL) {
+		ret = io_submit_init_lbio(io, bh);
+		if (ret)
+			return ret;
+		io->io_bio->bi_write_hint = inode->i_write_hint;
+	}
+new_lbio:
+	if (!(ret = lbio_add_write_page(io->last_lbio, bh->b_page))) {
+		io_submit_add_new_lbio(io, bh);
+		goto new_lbio;
+	}
+	wbc_account_io(io->io_wbc, page, bh->b_size);
+	io->io_next_block++;
+	return 0;
+}
+#endif
 
 static int io_submit_add_bh(struct ext4_io_submit *io,
 			    struct inode *inode,
@@ -463,8 +667,16 @@ int ext4_bio_write_page(struct ext4_io_submit *io,
 			/* A hole? We can safely clear the dirty bit */
 			if (!buffer_mapped(bh))
 				clear_buffer_dirty(bh);
-			if (io->io_bio)
+			if (io->io_bio) {
+#ifdef CONFIG_AIOS
+				if (io->lbio)
+					ext4_lbio_submit(io);
+				else
+					ext4_io_submit(io);
+#else
 				ext4_io_submit(io);
+#endif
+			}
 			continue;
 		}
 		if (buffer_new(bh)) {
@@ -488,7 +700,14 @@ int ext4_bio_write_page(struct ext4_io_submit *io,
 			ret = PTR_ERR(data_page);
 			if (ret == -ENOMEM && wbc->sync_mode == WB_SYNC_ALL) {
 				if (io->io_bio) {
+#ifdef CONFIG_AIOS
+					if (io->lbio)
+						ext4_lbio_submit(io);
+					else
+						ext4_io_submit(io);
+#else
 					ext4_io_submit(io);
+#endif
 					congestion_wait(BLK_RW_ASYNC, HZ/50);
 				}
 				gfp_flags |= __GFP_NOFAIL;
@@ -503,8 +722,17 @@ int ext4_bio_write_page(struct ext4_io_submit *io,
 	do {
 		if (!buffer_async_write(bh))
 			continue;
+#ifdef CONFIG_AIOS
+		if (io->lbio)
+			ret = lbio_submit_add_bh(io, inode,
+				data_page ? data_page : page, bh);
+		else
+			ret = io_submit_add_bh(io, inode,
+				data_page ? data_page : page, bh);
+#else
 		ret = io_submit_add_bh(io, inode,
-				       data_page ? data_page : page, bh);
+				data_page ? data_page : page, bh);
+#endif
 		if (ret) {
 			/*
 			 * We only get here on ENOMEM.  Not much else

@@ -414,6 +414,24 @@ void blk_mq_sched_insert_requests(struct blk_mq_hw_ctx *hctx,
 {
 	struct elevator_queue *e;
 
+	// MQBYPASS
+	if (current->flags & PF_MQBYPASS) {
+		struct blk_mq_queue_data bd = {
+			.rq = NULL,
+			.last = false,
+		};
+
+		while (!list_empty(list)) {
+			bd.rq = list_first_entry(list, struct request,
+						queuelist);
+			list_del_init(&(bd.rq->queuelist));
+			bd.last = list_empty(list);
+
+			hctx->queue->mq_ops->queue_rq(hctx, &bd);
+		}
+		return;
+	}
+
 	e = hctx->queue->elevator;
 	if (e && e->type->ops.insert_requests)
 		e->type->ops.insert_requests(hctx, list, false);

@@ -40,6 +40,7 @@
 #include <linux/bitops.h>
 #include <linux/iomap.h>
 #include <linux/iversion.h>
+#include <linux/lbio.h>
 
 #include "ext4_jbd2.h"
 #include "xattr.h"
@@ -2137,6 +2138,9 @@ static int ext4_writepage(struct page *page,
 	struct inode *inode = page->mapping->host;
 	struct ext4_io_submit io_submit;
 	bool keep_towrite = false;
+#ifdef CONFIG_AIOS
+	io_submit.lbio = 0;
+#endif
 
 	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb)))) {
 		ext4_invalidatepage(page, 0, PAGE_SIZE);
@@ -2737,6 +2741,13 @@ static int ext4_writepages(struct address_space *mapping,
 	bool done;
 	struct blk_plug plug;
 	bool give_up_on_write = false;
+#ifdef CONFIG_AIOS
+	if (atomic_read(&mapping->host->aios_count)) {
+		mpd.io_submit.lbio = 1;
+		mpd.io_submit.last_lbio = NULL;
+	} else
+		mpd.io_submit.lbio = 0;
+#endif
 
 	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
 		return -EIO;
@@ -2837,7 +2848,14 @@ retry:
 	}
 	ret = mpage_prepare_extent_to_map(&mpd);
 	/* Submit prepared bio */
+#ifdef CONFIG_AIOS
+	if (mpd.io_submit.lbio)
+		ext4_lbio_submit(&mpd.io_submit);
+	else
+		ext4_io_submit(&mpd.io_submit);
+#else
 	ext4_io_submit(&mpd.io_submit);
+#endif
 	ext4_put_io_end_defer(mpd.io_submit.io_end);
 	mpd.io_submit.io_end = NULL;
 	/* Unlock pages we didn't use */
@@ -2910,7 +2928,14 @@ retry:
 			mpd.do_map = 0;
 		}
 		/* Submit prepared bio */
+#ifdef CONFIG_AIOS
+		if (mpd.io_submit.lbio)
+			ext4_lbio_submit(&mpd.io_submit);
+		else
+			ext4_io_submit(&mpd.io_submit);
+#else
 		ext4_io_submit(&mpd.io_submit);
+#endif
 		/* Unlock pages we didn't use */
 		mpage_release_unused_pages(&mpd, give_up_on_write);
 		/*
@@ -3374,6 +3399,21 @@ ext4_readpages(struct file *file, struct address_space *mapping,
 
 	return ext4_mpage_readpages(mapping, pages, NULL, nr_pages, true);
 }
+
+#ifdef CONFIG_AIOS
+static int
+ext4_AIOS_readpages(struct file *file, struct address_space *mapping,
+		struct list_head *pages, unsigned nr_pages, void **lbio)
+{
+	struct inode *inode = mapping->host;
+
+	/* If the file has inline data, no need to do readpages. */
+	if (ext4_has_inline_data(inode))
+		return 0;
+
+	return ext4_AIOS_mpage_readpages(mapping, pages, NULL, nr_pages, lbio);
+}
+#endif
 
 static void ext4_invalidatepage(struct page *page, unsigned int offset,
 				unsigned int length)
@@ -3933,6 +3973,9 @@ static int ext4_set_page_dirty(struct page *page)
 static const struct address_space_operations ext4_aops = {
 	.readpage		= ext4_readpage,
 	.readpages		= ext4_readpages,
+#ifdef CONFIG_AIOS
+	.AIOS_readpages		= ext4_AIOS_readpages,
+#endif
 	.writepage		= ext4_writepage,
 	.writepages		= ext4_writepages,
 	.write_begin		= ext4_write_begin,
@@ -3950,6 +3993,9 @@ static const struct address_space_operations ext4_aops = {
 static const struct address_space_operations ext4_journalled_aops = {
 	.readpage		= ext4_readpage,
 	.readpages		= ext4_readpages,
+#ifdef CONFIG_AIOS
+	.AIOS_readpages		= ext4_AIOS_readpages,
+#endif
 	.writepage		= ext4_writepage,
 	.writepages		= ext4_writepages,
 	.write_begin		= ext4_write_begin,
@@ -3966,6 +4012,9 @@ static const struct address_space_operations ext4_journalled_aops = {
 static const struct address_space_operations ext4_da_aops = {
 	.readpage		= ext4_readpage,
 	.readpages		= ext4_readpages,
+#ifdef CONFIG_AIOS
+	.AIOS_readpages		= ext4_AIOS_readpages,
+#endif
 	.writepage		= ext4_writepage,
 	.writepages		= ext4_writepages,
 	.write_begin		= ext4_da_write_begin,
@@ -6319,4 +6368,23 @@ vm_fault_t ext4_filemap_fault(struct vm_fault *vmf)
 	up_read(&EXT4_I(inode)->i_mmap_sem);
 
 	return ret;
+}
+
+void ext4_extent_preload(struct address_space *mapping)
+{
+	struct inode *inode = mapping->host;
+	const unsigned blkbits = inode->i_blkbits;
+	const unsigned blocksize = 1 << blkbits;
+	sector_t block_in_file;
+	sector_t last_block;
+	struct ext4_map_blocks map;
+
+	block_in_file = 0;
+	last_block = (i_size_read(inode) + blocksize - 1) >> blkbits;
+	while (block_in_file < last_block) {
+		map.m_lblk = block_in_file;
+		map.m_len = last_block - block_in_file;
+		ext4_map_blocks(NULL, inode, &map, 0);
+		block_in_file += map.m_len;
+	}
 }

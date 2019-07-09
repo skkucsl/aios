@@ -102,6 +102,7 @@ enum pageflags {
 	PG_young,
 	PG_idle,
 #endif
+	PG_reuse,
 	__NR_PAGEFLAGS,
 
 	/* Filesystems */
@@ -397,6 +398,8 @@ SETPAGEFLAG(Young, young, PF_ANY)
 TESTCLEARFLAG(Young, young, PF_ANY)
 PAGEFLAG(Idle, idle, PF_ANY)
 #endif
+
+PAGEFLAG(Reuse, reuse, PF_NO_COMPOUND)
 
 /*
  * On an anonymous page mapped into a user virtual memory area,

@@ -564,6 +564,8 @@ struct transaction_s
 	/* Sequence number for this transaction [no locking] */
 	tid_t			t_tid;
 
+	int aios;
+
 	/*
 	 * Transaction's current state
 	 * [no locking - only kjournald2 alters this]
@@ -751,6 +753,10 @@ struct journal_s
 	 * @j_flags: General journaling state flags [j_state_lock]
 	 */
 	unsigned long		j_flags;
+
+#ifdef CONFIG_AIOS
+	int aios;
+#endif
 
 	/**
 	 * @j_errno:
@@ -1474,6 +1480,7 @@ int __jbd2_log_start_commit(journal_t *journal, tid_t tid);
 int jbd2_journal_start_commit(journal_t *journal, tid_t *tid);
 int jbd2_log_wait_commit(journal_t *journal, tid_t tid);
 int jbd2_transaction_committed(journal_t *journal, tid_t tid);
+int jbd2_early_wakeup_transaction(journal_t *journal, tid_t tid);
 int jbd2_complete_transaction(journal_t *journal, tid_t tid);
 int jbd2_log_do_checkpoint(journal_t *journal);
 int jbd2_trans_will_send_data_barrier(journal_t *journal, tid_t tid);

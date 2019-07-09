@@ -94,7 +94,14 @@ struct dma_map_ops {
 			       unsigned long offset, size_t size,
 			       enum dma_data_direction dir,
 			       unsigned long attrs);
+	dma_addr_t (*AIOS_map_page)(struct device *dev, struct page *page,
+			       unsigned long offset, size_t size,
+			       enum dma_data_direction dir,
+			       unsigned long attrs);
 	void (*unmap_page)(struct device *dev, dma_addr_t dma_handle,
+			   size_t size, enum dma_data_direction dir,
+			   unsigned long attrs);
+	void (*AIOS_unmap_page)(struct device *dev, dma_addr_t dma_handle,
 			   size_t size, enum dma_data_direction dir,
 			   unsigned long attrs);
 	/*
@@ -102,6 +109,9 @@ struct dma_map_ops {
 	 * It should never return a value < 0.
 	 */
 	int (*map_sg)(struct device *dev, struct scatterlist *sg,
+		      int nents, enum dma_data_direction dir,
+		      unsigned long attrs);
+	int (*AIOS_map_sg)(struct device *dev, struct scatterlist *sg,
 		      int nents, enum dma_data_direction dir,
 		      unsigned long attrs);
 	void (*unmap_sg)(struct device *dev,
@@ -293,6 +303,27 @@ static inline dma_addr_t dma_map_page_attrs(struct device *dev,
 	return addr;
 }
 
+static inline dma_addr_t AIOS_dma_map_page_attrs(struct device *dev,
+		struct page *page, size_t offset, size_t size,
+		enum dma_data_direction dir, unsigned long attrs)
+{
+	const struct dma_map_ops *ops = get_dma_ops(dev);
+	dma_addr_t addr;
+
+	BUG_ON(!valid_dma_direction(dir));
+	if (dma_is_direct(ops)) {
+		addr = dma_direct_map_page(dev, page, offset, size, dir, attrs);
+	} else {
+		if (ops->AIOS_map_page)
+			addr = ops->AIOS_map_page(dev, page, offset, size, dir, attrs);
+		else
+			addr = ops->map_page(dev, page, offset, size, dir, attrs);
+	}
+	debug_dma_map_page(dev, page, offset, size, dir, addr);
+
+	return addr;
+}
+
 static inline void dma_unmap_page_attrs(struct device *dev, dma_addr_t addr,
 		size_t size, enum dma_data_direction dir, unsigned long attrs)
 {
@@ -303,6 +334,23 @@ static inline void dma_unmap_page_attrs(struct device *dev, dma_addr_t addr,
 		dma_direct_unmap_page(dev, addr, size, dir, attrs);
 	else if (ops->unmap_page)
 		ops->unmap_page(dev, addr, size, dir, attrs);
+	debug_dma_unmap_page(dev, addr, size, dir);
+}
+
+static inline void AIOS_dma_unmap_page_attrs(struct device *dev, dma_addr_t addr,
+		size_t size, enum dma_data_direction dir, unsigned long attrs)
+{
+	const struct dma_map_ops *ops = get_dma_ops(dev);
+
+	BUG_ON(!valid_dma_direction(dir));
+	if (dma_is_direct(ops)) {
+		dma_direct_unmap_page(dev, addr, size, dir, attrs);
+	} else {
+		if (ops->AIOS_unmap_page)
+			ops->AIOS_unmap_page(dev, addr, size, dir, attrs);
+		else if (ops->unmap_page)
+			ops->unmap_page(dev, addr, size, dir, attrs);
+	}
 	debug_dma_unmap_page(dev, addr, size, dir);
 }
 
@@ -322,6 +370,28 @@ static inline int dma_map_sg_attrs(struct device *dev, struct scatterlist *sg,
 		ents = dma_direct_map_sg(dev, sg, nents, dir, attrs);
 	else
 		ents = ops->map_sg(dev, sg, nents, dir, attrs);
+	BUG_ON(ents < 0);
+	debug_dma_map_sg(dev, sg, nents, ents, dir);
+
+	return ents;
+}
+
+static inline int AIOS_dma_map_sg_attrs(struct device *dev, struct scatterlist *sg,
+				   int nents, enum dma_data_direction dir,
+				   unsigned long attrs)
+{
+	const struct dma_map_ops *ops = get_dma_ops(dev);
+	int ents;
+
+	BUG_ON(!valid_dma_direction(dir));
+	if (dma_is_direct(ops)) {
+		ents = dma_direct_map_sg(dev, sg, nents, dir, attrs);
+	} else {
+		if (ops->AIOS_map_sg)
+			ents = ops->AIOS_map_sg(dev, sg, nents, dir, attrs);
+		else
+			ents = ops->map_sg(dev, sg, nents, dir, attrs);
+	}
 	BUG_ON(ents < 0);
 	debug_dma_map_sg(dev, sg, nents, ents, dir);
 
@@ -607,6 +677,9 @@ static inline void dma_sync_single_range_for_device(struct device *dev,
 #define dma_unmap_page(d, a, s, r) dma_unmap_page_attrs(d, a, s, r, 0)
 #define dma_get_sgtable(d, t, v, h, s) dma_get_sgtable_attrs(d, t, v, h, s, 0)
 #define dma_mmap_coherent(d, v, c, h, s) dma_mmap_attrs(d, v, c, h, s, 0)
+#define AIOS_dma_map_sg(d, s, n, r) AIOS_dma_map_sg_attrs(d, s, n, r, 0)
+#define AIOS_dma_map_page(d, p, o, s, r) AIOS_dma_map_page_attrs(d, p, o, s, r, 0)
+#define AIOS_dma_unmap_page(d, a, s, r) AIOS_dma_unmap_page_attrs(d, a, s, r, 0)
 
 extern int dma_common_mmap(struct device *dev, struct vm_area_struct *vma,
 		void *cpu_addr, dma_addr_t dma_addr, size_t size,

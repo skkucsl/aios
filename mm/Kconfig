@@ -758,4 +758,8 @@ config GUP_BENCHMARK
 config ARCH_HAS_PTE_SPECIAL
 	bool
 
+config AIOS
+	bool "Asynchronous I/O stack"
+	default n
+
 endmenu

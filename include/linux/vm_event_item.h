@@ -110,6 +110,8 @@ enum vm_event_item { PGPGIN, PGPGOUT, PSWPIN, PSWPOUT,
 		SWAP_RA,
 		SWAP_RA_HIT,
 #endif
+		AIOS_PAGE_EEXIST,
+
 		NR_VM_EVENT_ITEMS
 };
 

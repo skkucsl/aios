@@ -44,6 +44,7 @@
 #include <linux/backing-dev.h>
 #include <linux/pagevec.h>
 #include <linux/cleancache.h>
+#include <linux/lbio.h>
 
 #include "ext4.h"
 
@@ -130,7 +131,7 @@ int ext4_mpage_readpages(struct address_space *mapping,
 		if (pages) {
 			page = lru_to_page(pages);
 			list_del(&page->lru);
-			if (add_to_page_cache_lru(page, mapping, page->index,
+			if(add_to_page_cache_lru(page, mapping, page->index,
 				  readahead_gfp_mask(mapping)))
 				goto next_page;
 		}
@@ -213,6 +214,7 @@ int ext4_mpage_readpages(struct address_space *mapping,
 				block_in_file++;
 			}
 		}
+
 		if (first_hole != blocks_per_page) {
 			zero_user_segment(page, first_hole << blkbits,
 					  PAGE_SIZE);
@@ -293,3 +295,205 @@ int ext4_mpage_readpages(struct address_space *mapping,
 		submit_bio(bio);
 	return 0;
 }
+
+#ifdef CONFIG_AIOS
+static void AIOS_mpage_end_io(struct lbio *lbio)
+{
+	int i;
+
+	for (i = 0; i < lbio->vcnt; ++i) {
+		struct lbio_vec *bv = &lbio->vec[i];
+		struct page *page = bv->page;
+
+		if (!lbio->status) {
+			SetPageUptodate(page);
+		} else {
+			ClearPageUptodate(page);
+			SetPageError(page);
+		}
+		unlock_page(page);
+	}
+<<<<<<< HEAD
+=======
+
+	lbio_set_completed(lbio);
+	push_lazy_single(lbio);
+
+	if (atomic_read(&lbio->lbio_waiters))
+		wake_up(&lbio->lbio_waitqueue);
+>>>>>>> 70721a85a2489683591d2143db970bfa8e6f4bab
+}
+
+int ext4_AIOS_mpage_readpages(struct address_space *mapping,
+			 struct list_head *pages, struct page *page,
+			 unsigned nr_pages, void **ret_lbio)
+{
+	struct lbio *lbio = NULL;
+	struct lbio *first_lbio = NULL;
+	struct lbio *last_lbio = NULL;
+	sector_t last_block_in_lbio = -1;
+
+	struct inode *inode = mapping->host;
+	const unsigned blkbits = inode->i_blkbits;
+	const unsigned blocks_per_page = PAGE_SIZE >> blkbits;
+	const unsigned blocksize = 1 << blkbits;
+	sector_t block_in_file;
+	sector_t last_block;
+	sector_t last_block_in_file;
+	sector_t blocks[MAX_BUF_PER_PAGE];
+	unsigned page_block;
+	struct block_device *bdev = inode->i_sb->s_bdev;
+	unsigned relative_block = 0;
+	struct ext4_map_blocks map;
+
+	map.m_pblk = 0;
+	map.m_lblk = 0;
+	map.m_len = 0;
+	map.m_flags = 0;
+
+	for (; nr_pages; nr_pages--) {
+		int fully_mapped = 1;
+		unsigned first_hole = blocks_per_page;
+
+		prefetchw(&page->flags);
+		if (pages) {
+			page = lru_to_page(pages);
+			list_del(&page->lru);
+		}
+
+		block_in_file = (sector_t)page->index << (PAGE_SHIFT - blkbits);
+		last_block = block_in_file + nr_pages * blocks_per_page;
+		last_block_in_file = (i_size_read(inode) + blocksize - 1) >> blkbits;
+		if (last_block > last_block_in_file)
+			last_block = last_block_in_file;
+		page_block = 0;
+
+		/*
+		 * Map blocks using the previous result first.
+		 */
+		if ((map.m_flags & EXT4_MAP_MAPPED) &&
+		    block_in_file > map.m_lblk &&
+		    block_in_file < (map.m_lblk + map.m_len)) {
+			unsigned map_offset = block_in_file - map.m_lblk;
+			unsigned last = map.m_len - map_offset;
+
+			for (relative_block = 0; ; relative_block++) {
+				if (relative_block == last) {
+					/* needed? */
+					map.m_flags &= ~EXT4_MAP_MAPPED;
+					break;
+				}
+				if (page_block == blocks_per_page)
+					break;
+				blocks[page_block] = map.m_pblk + map_offset +
+					relative_block;
+				page_block++;
+				block_in_file++;
+			}
+		}
+
+		/*
+		 * Then do more ext4_map_blocks() calls until we are
+		 * done with this page.
+		 */
+		while (page_block < blocks_per_page) {
+			if (block_in_file < last_block) {
+				map.m_lblk = block_in_file;
+				map.m_len = last_block - block_in_file;
+
+				if (ext4_map_blocks(NULL, inode, &map, 0) < 0) {
+					SetPageError(page);
+					zero_user_segment(page, 0,
+							  PAGE_SIZE);
+					unlock_page(page);
+					continue;
+				}
+			}
+			if ((map.m_flags & EXT4_MAP_MAPPED) == 0) {
+				fully_mapped = 0;
+				if (first_hole == blocks_per_page)
+					first_hole = page_block;
+				page_block++;
+				block_in_file++;
+				continue;
+			}
+			if (first_hole != blocks_per_page)
+				goto confused;		/* hole -> non-hole */
+
+			/* Contiguous blocks? */
+			if (page_block && blocks[page_block-1] != map.m_pblk-1)
+				goto confused;
+			for (relative_block = 0; ; relative_block++) {
+				if (relative_block == map.m_len) {
+					/* needed? */
+					map.m_flags &= ~EXT4_MAP_MAPPED;
+					break;
+				} else if (page_block == blocks_per_page)
+					break;
+				blocks[page_block] = map.m_pblk+relative_block;
+				page_block++;
+				block_in_file++;
+			}
+		}
+
+		if (first_hole != blocks_per_page) {
+			zero_user_segment(page, first_hole << blkbits,
+					  PAGE_SIZE);
+			if (first_hole == 0) {
+				SetPageUptodate(page);
+				unlock_page(page);
+				continue;
+			}
+		} else if (fully_mapped) {
+			SetPageMappedToDisk(page);
+		}
+
+		if (!lbio || last_block_in_lbio == -1
+				|| (last_block_in_lbio != blocks[0] - 1)) {
+			if (!last_lbio) {
+				last_lbio = lbio_alloc(GFP_KERNEL, min_t(int, nr_pages, BIO_MAX_PAGES));
+				if (!first_lbio) {
+					first_lbio = last_lbio;
+					list_add_tail(&first_lbio->list, &current->plug->lbio_list);
+				}
+			} else {
+alloc_next_lbio:
+				last_lbio->next = 
+					lbio_alloc(GFP_KERNEL, min_t(int, nr_pages, BIO_MAX_PAGES));
+				last_lbio = last_lbio->next;
+			}
+			BUG_ON(!last_lbio);
+			lbio = last_lbio;
+			lbio->sector = blocks[0] << (blkbits - 9);
+			lbio->bi_end_io = AIOS_mpage_end_io;
+			if (bdev->bd_partno) {
+				struct hd_struct *p;
+				rcu_read_lock();
+				p = __disk_get_part(bdev->bd_disk, bdev->bd_partno);
+				lbio->sector += p->start_sect;
+				rcu_read_unlock();
+			}
+		}
+		if (!lbio_add_page(lbio, page))
+			goto alloc_next_lbio;
+
+		if (((map.m_flags & EXT4_MAP_BOUNDARY) &&
+		     (relative_block == map.m_len)) ||
+		    (first_hole != blocks_per_page)) {
+			lbio = NULL;
+		} else
+			last_block_in_lbio = blocks[blocks_per_page - 1];
+		continue;
+	confused:
+		if (lbio)
+			lbio = NULL;
+		if (!PageUptodate(page))
+			block_read_full_page(page, ext4_get_block);
+		else
+			unlock_page(page);
+	}
+	BUG_ON(pages && !list_empty(pages));
+	*ret_lbio = (void *)first_lbio;
+	return 0;
+}
+#endif

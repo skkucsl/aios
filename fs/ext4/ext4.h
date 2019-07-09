@@ -212,6 +212,8 @@ struct ext4_io_submit {
 	struct bio		*io_bio;
 	ext4_io_end_t		*io_end;
 	sector_t		io_next_block;
+	int lbio;
+	struct lbio *last_lbio;
 };
 
 /*
@@ -2375,6 +2377,7 @@ extern int ext4_check_all_de(struct inode *dir, struct buffer_head *bh,
 			     void *buf, int buf_size);
 
 /* fsync.c */
+extern int ext4_AIOS_sync_file(struct file *, loff_t, loff_t, int);
 extern int ext4_sync_file(struct file *, loff_t, loff_t, int);
 
 /* hash.c */
@@ -3090,6 +3093,9 @@ static inline void ext4_set_de_type(struct super_block *sb,
 extern int ext4_mpage_readpages(struct address_space *mapping,
 				struct list_head *pages, struct page *page,
 				unsigned nr_pages, bool is_readahead);
+extern int ext4_AIOS_mpage_readpages(struct address_space *mapping,
+				struct list_head *pages, struct page *page,
+				unsigned nr_pages, void **ret_lbio);
 
 /* symlink.c */
 extern const struct inode_operations ext4_encrypted_symlink_inode_operations;
@@ -3186,6 +3192,7 @@ extern void ext4_put_io_end_defer(ext4_io_end_t *io_end);
 extern void ext4_io_submit_init(struct ext4_io_submit *io,
 				struct writeback_control *wbc);
 extern void ext4_end_io_rsv_work(struct work_struct *work);
+extern void ext4_lbio_submit(struct ext4_io_submit *io);
 extern void ext4_io_submit(struct ext4_io_submit *io);
 extern int ext4_bio_write_page(struct ext4_io_submit *io,
 			       struct page *page,
@@ -3246,6 +3253,8 @@ static inline void ext4_clear_io_unwritten_flag(ext4_io_end_t *io_end)
 }
 
 extern const struct iomap_ops ext4_iomap_ops;
+
+void ext4_extent_preload(struct address_space *mapping);
 
 #endif	/* __KERNEL__ */
 

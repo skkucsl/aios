@@ -233,6 +233,42 @@ static blk_status_t nvme_error_status(struct request *req)
 	}
 }
 
+#ifdef CONFIG_AIOS
+blk_status_t nvme_AIOS_error_status(blk_status_t status)
+{
+	switch (status & 0x7ff) {
+	case NVME_SC_SUCCESS:
+		return BLK_STS_OK;
+	case NVME_SC_CAP_EXCEEDED:
+		return BLK_STS_NOSPC;
+	case NVME_SC_LBA_RANGE:
+		return BLK_STS_TARGET;
+	case NVME_SC_BAD_ATTRIBUTES:
+	case NVME_SC_ONCS_NOT_SUPPORTED:
+	case NVME_SC_INVALID_OPCODE:
+	case NVME_SC_INVALID_FIELD:
+	case NVME_SC_INVALID_NS:
+		return BLK_STS_NOTSUPP;
+	case NVME_SC_WRITE_FAULT:
+	case NVME_SC_READ_ERROR:
+	case NVME_SC_UNWRITTEN_BLOCK:
+	case NVME_SC_ACCESS_DENIED:
+	case NVME_SC_READ_ONLY:
+	case NVME_SC_COMPARE_FAILED:
+		return BLK_STS_MEDIUM;
+	case NVME_SC_GUARD_CHECK:
+	case NVME_SC_APPTAG_CHECK:
+	case NVME_SC_REFTAG_CHECK:
+	case NVME_SC_INVALID_PI:
+		return BLK_STS_PROTECTION;
+	case NVME_SC_RESERVATION_CONFLICT:
+		return BLK_STS_NEXUS;
+	default:
+		return BLK_STS_IOERR;
+	}
+}
+#endif
+
 static inline bool nvme_req_needs_retry(struct request *req)
 {
 	if (blk_noretry_request(req))

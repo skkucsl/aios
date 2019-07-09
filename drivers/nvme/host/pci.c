@@ -35,6 +35,13 @@
 #include "trace.h"
 #include "nvme.h"
 
+#include <linux/lbio.h>
+#define NUM_CORE num_online_cpus()
+#define DEV_INSTANCE 0
+#define NVME_AIOS 0x8000
+DEFINE_PER_CPU(struct nvme_queue *, nvme_irq_queues);
+DEFINE_PER_CPU(struct nvme_queue *, nvme_poll_queues);
+
 #define SQ_SIZE(depth)		(depth * sizeof(struct nvme_command))
 #define CQ_SIZE(depth)		(depth * sizeof(struct nvme_completion))
 
@@ -979,11 +986,85 @@ static inline void nvme_ring_cq_doorbell(struct nvme_queue *nvmeq)
 		writel(head, nvmeq->q_db + nvmeq->dev->db_stride);
 }
 
+#ifdef CONFIG_AIOS
+static void lbio_req_completion(struct lbio *lbio)
+{
+	BUG_ON(!lbio_is_busy(lbio));
+	lbio->bi_end_io(lbio);
+
+	lbio_set_completed(lbio);
+	push_lazy_single(lbio);
+
+	if (atomic_read(&lbio->lbio_waiters))
+		wake_up(&lbio->lbio_waitqueue);
+}
+
+static void lbio_write_req_completion(struct nvme_queue *queue, struct lbio *lbio)
+{
+	BUG_ON(!lbio_is_busy(lbio));
+
+<<<<<<< HEAD
+	if (lbio_is_fua(lbio)) {
+		nvme_lbio_submit_cmd(lbio, 0);
+		return;
+	}
+
+	dma_unmap_sg(queue->q_dmadev, (struct scatterlist *)(lbio->vec[0].dma_addr),
+													lbio->vcnt, DMA_TO_DEVICE);
+	kfree((struct scatterlist *)(lbio->vec[0].dma_addr));
+
+	lbio->bi_end_io(lbio);
+
+=======
+	AIOS_dma_unmap_sg(queue->q_dmadev, lbio->vec[0].dma_addr,
+									lbio->vcnt, DMA_TO_DEVICE);
+	lbio->bi_end_io(lbio);
+
+>>>>>>> 70721a85a2489683591d2143db970bfa8e6f4bab
+	if (lbio->max_vcnt > LBIO_INLINE_VECS)
+		kfree(lbio->vec);
+
+	if (lbio->prp_list) {
+		int nprps = DIV_ROUND_UP(lbio->vcnt * PAGE_SIZE, queue->dev->ctrl.page_size);
+		if (nprps <= (256 / 8)) 
+			dma_pool_free(queue->dev->prp_small_pool, lbio->prp_list, lbio->prp_dma);
+		else
+			dma_pool_free(queue->dev->prp_page_pool, lbio->prp_list, lbio->prp_dma);
+	}
+	lbio->prp_list = NULL;
+
+	lbio_clear_write(lbio);
+	lbio_clear_completed(lbio);
+	lbio_clear_busy(lbio);
+
+	if (atomic_read(&lbio->lbio_waiters))
+		wake_up(&lbio->lbio_waitqueue);
+}
+#endif
+
 static inline void nvme_handle_cqe(struct nvme_queue *nvmeq, u16 idx)
 {
 	volatile struct nvme_completion *cqe = &nvmeq->cqes[idx];
 	struct request *req;
 
+<<<<<<< HEAD
+#ifdef CONFIG_AIOS
+	if (cqe->command_id & NVME_AIOS) {
+		struct lbio *lbio = tag_to_lbio(cqe->command_id & ~NVME_AIOS);
+		lbio->status = nvme_AIOS_error_status(le16_to_cpu(cqe->status) >> 1);
+		if (lbio->status)
+			printk(KERN_ERR "[AIOS ERROR] %s:%d\n", __func__, __LINE__);
+
+		if (lbio_is_write(lbio))
+			lbio_write_req_completion(nvmeq, lbio);
+		else
+			lbio_req_completion(lbio);
+		return;
+	}
+#endif
+
+=======
+>>>>>>> 70721a85a2489683591d2143db970bfa8e6f4bab
 	if (unlikely(cqe->command_id >= nvmeq->q_depth)) {
 		dev_warn(nvmeq->dev->ctrl.device,
 			"invalid id %d completed on queue %d\n",
@@ -1003,6 +1084,21 @@ static inline void nvme_handle_cqe(struct nvme_queue *nvmeq, u16 idx)
 				cqe->status, &cqe->result);
 		return;
 	}
+
+#ifdef CONFIG_AIOS
+	if (cqe->command_id & NVME_AIOS) {
+		struct lbio *lbio = tag_to_lbio(cqe->command_id & ~NVME_AIOS);
+		lbio->status = nvme_AIOS_error_status(le16_to_cpu(cqe->status) >> 1);
+		if (lbio->status)
+			printk(KERN_ERR "[AIOS ERROR] %s:%d\n", __func__, __LINE__);
+
+		if (lbio_is_write(lbio))
+			lbio_write_req_completion(nvmeq, lbio);
+		else
+			lbio_req_completion(lbio);
+		return;
+	}
+#endif
 
 	req = blk_mq_tag_to_rq(*nvmeq->tags, cqe->command_id);
 	trace_nvme_sq(req, cqe->sq_head, nvmeq->sq_tail);
@@ -1515,6 +1611,27 @@ static int nvme_alloc_queue(struct nvme_dev *dev, int qid, int depth)
 	nvmeq->qid = qid;
 	nvmeq->cq_vector = -1;
 	dev->ctrl.queue_count++;
+
+#ifdef CONFIG_AIOS
+	if (dev->ctrl.instance == DEV_INSTANCE) {
+		if (qid > 0 && qid <= 4) {
+			//struct nvme_queue **per_cpu_queue = &per_cpu(nvme_irq_queues, (qid - 1) * 2);
+			//*per_cpu_queue = nvmeq;
+			//printk(KERN_ERR "[AIOS %s] NVMe interrupt queue: %p cpu: %d qid: %d depth: %d\n",
+			//		__func__, nvmeq, (qid - 1) * 2, qid, depth);
+			// kvm
+			struct nvme_queue **per_cpu_queue = &per_cpu(nvme_irq_queues, qid - 1);
+			*per_cpu_queue = nvmeq;
+			printk(KERN_ERR "[AIOS %s] NVMe interrupt queue: %p cpu: %d qid: %d depth: %d\n",
+					__func__, nvmeq, qid - 1, qid, depth);
+		} else if (qid > 8 && qid <= 12) {
+			struct nvme_queue **per_cpu_queue = &per_cpu(nvme_irq_queues, (qid - NUM_CORE) * 2 - 1);
+			*per_cpu_queue = nvmeq;
+			printk(KERN_ERR "[AIOS %s] NVMe interrupt queue: %p cpu: %d qid: %d depth: %d\n",
+					__func__, nvmeq, (qid - NUM_CORE) * 2 - 1, qid, depth);
+		}
+	}
+#endif
 
 	return 0;
 
@@ -2165,12 +2282,13 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)
 
 	nr_io_queues = max_io_queues();
 	result = nvme_set_queue_count(&dev->ctrl, &nr_io_queues);
+
 	if (result < 0)
 		return result;
 
 	if (nr_io_queues == 0)
 		return 0;
-	
+
 	clear_bit(NVMEQ_ENABLED, &adminq->flags);
 
 	if (dev->cmb_use_sqes) {
@@ -2825,6 +2943,11 @@ static int nvme_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	nvme_get_ctrl(&dev->ctrl);
 	async_schedule(nvme_async_probe, dev);
 
+#ifdef CONFIG_AIOS
+	if (dev->ctrl.instance == DEV_INSTANCE)
+		init_lbio(dev->dev);
+#endif
+
 	return 0;
 
  release_mempool:
@@ -2856,6 +2979,12 @@ static void nvme_reset_done(struct pci_dev *pdev)
 static void nvme_shutdown(struct pci_dev *pdev)
 {
 	struct nvme_dev *dev = pci_get_drvdata(pdev);
+
+#ifdef CONFIG_AIOS
+	if (dev->ctrl.instance == DEV_INSTANCE)
+		exit_lbio();
+#endif
+
 	nvme_dev_disable(dev, true);
 }
 
@@ -3033,6 +3162,433 @@ static void __exit nvme_exit(void)
 	flush_workqueue(nvme_wq);
 	_nvme_check_size();
 }
+
+#ifdef CONFIG_AIOS
+static int nvme_lbio_setup_prps(struct nvme_dev *dev, struct scatterlist *sg,
+					struct lbio *lbio, dma_addr_t *prp1, dma_addr_t *prp2)
+{
+	struct scatterlist *sg_temp = NULL;
+	struct dma_pool *pool;
+	__le64 *prp_list;
+	dma_addr_t prp_dma;
+	int nprps, i;
+
+	if (sg) {
+		sg_temp = sg;
+		*prp1 = cpu_to_le64(sg_temp->dma_address);
+		if (lbio->vcnt < 2) {
+			*prp2 = 0;
+			return 0;
+		} else if (lbio->vcnt == 2) {
+			sg_temp = sg_next(sg_temp);
+			*prp2 = cpu_to_le64(sg_temp->dma_address);
+			return 0;
+		}
+	} else {
+		*prp1 = cpu_to_le64(lbio->vec[0].dma_addr);
+		if (lbio->vcnt < 2) {
+			*prp2 = 0;
+			return 0;
+		} else if (lbio->vcnt == 2) {
+			*prp2 = cpu_to_le64(lbio->vec[1].dma_addr);
+			return 0;
+		}
+	}
+
+	nprps = DIV_ROUND_UP(lbio->vcnt * PAGE_SIZE, dev->ctrl.page_size);
+
+	BUG_ON(nprps > PAGE_SIZE / 8);
+	if (nprps <= (256 / 8))
+		pool = dev->prp_small_pool;
+	else
+		pool = dev->prp_page_pool;
+
+	prp_list = dma_pool_alloc(pool, GFP_ATOMIC, &prp_dma);
+
+	if (!prp_list) {
+		printk(KERN_ERR "[AIOS ERROR] %s:%d dma_pool_alloc failed\n",
+													__func__, __LINE__);
+		return -ENOMEM;
+	}
+
+	lbio->prp_list = prp_list;
+	lbio->prp_dma = prp_dma;
+
+	*prp2 = prp_dma;
+	if (sg) {
+		for (i = 1; i < lbio->vcnt; ++i) {
+			sg_temp = sg_next(sg_temp);
+			prp_list[i-1] = sg_temp->dma_address;
+		}
+	} else {
+		for (i = 1; i < lbio->vcnt; ++i)
+			prp_list[i-1] = lbio->vec[i].dma_addr;
+	}
+
+	return 0;
+}
+
+int nvme_AIOS_read(struct lbio *lbio)
+{
+	struct nvme_queue *nvmeq = get_cpu_var(nvme_irq_queues);
+	struct nvme_command cmd;
+	struct nvme_ns *ns = list_entry(nvmeq->dev->ctrl.namespaces.next,
+												struct nvme_ns, list);
+	struct lbio *prev_lbio = NULL;
+	int ret;
+	memset(&cmd, 0, sizeof(cmd));
+
+	while (lbio) {
+		dma_addr_t prp1, prp2;
+
+		ret = nvme_lbio_setup_prps(nvmeq->dev, NULL, lbio, &prp1, &prp2);
+		if (ret) {
+			if (prev_lbio)
+				prev_lbio->next = NULL;
+			goto abort_remaining_lbios;
+		}
+
+		cmd.rw.opcode = nvme_cmd_read;
+		cmd.rw.command_id = lbio_tag(lbio) | NVME_AIOS;
+		cmd.rw.nsid = cpu_to_le32(ns->head->ns_id);
+		cmd.rw.slba = cpu_to_le64(nvme_block_nr(ns, lbio->sector));
+		cmd.rw.dptr.prp1 = cpu_to_le64(prp1);
+		cmd.rw.dptr.prp2 = cpu_to_le64(prp2);
+		cmd.rw.length = 
+			cpu_to_le16(((lbio->vcnt * PAGE_SIZE) >> ns->lba_shift) - 1);
+		cmd.rw.control = 0;
+		cmd.rw.dsmgmt = 0;
+
+		spin_lock_irq(&nvmeq->sq_lock);
+		memcpy(&nvmeq->sq_cmds[nvmeq->sq_tail], &cmd, sizeof(cmd));
+		if (++nvmeq->sq_tail == nvmeq->q_depth)
+			nvmeq->sq_tail = 0;
+		if (nvme_dbbuf_update_and_check_event(nvmeq->sq_tail,
+						nvmeq->dbbuf_sq_db, nvmeq->dbbuf_sq_ei))
+			writel(nvmeq->sq_tail, nvmeq->q_db);
+		nvmeq->last_sq_tail = nvmeq->sq_tail;
+		spin_unlock_irq(&nvmeq->sq_lock);
+
+		prev_lbio = lbio;
+		lbio = lbio->next;
+	}
+
+	put_cpu_var(nvme_irq_queues);
+
+	return 0;
+
+abort_remaining_lbios:
+	put_cpu_var(nvme_irq_queues);
+	lbio_req_completion_error(lbio);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(nvme_AIOS_read);
+
+int nvme_AIOS_write(struct lbio *lbio)
+{
+	struct nvme_queue *nvmeq = get_cpu_var(nvme_irq_queues);
+	struct nvme_command cmd;
+	struct nvme_ns* ns = list_entry(nvmeq->dev->ctrl.namespaces.next,
+												struct nvme_ns, list);
+	struct lbio *prev_lbio = NULL;
+	int ret;
+	memset(&cmd, 0, sizeof(cmd));
+
+	while (lbio) {
+		int nr_to_dma = lbio->vcnt;
+		int n = nr_to_dma;
+		struct scatterlist *sg = kmalloc(sizeof(struct scatterlist) * n, GFP_KERNEL);
+		struct scatterlist *sg_temp;
+		dma_addr_t prp1, prp2;
+
+		sg_init_table(sg, n);
+		sg_temp = sg;
+		if (lbio->bi_private) {
+			while (nr_to_dma > 0) {
+				sg_set_page(sg_temp, lbio->vec[n - nr_to_dma].page, PAGE_SIZE, 0);
+				sg_temp = sg_next(sg_temp);
+				nr_to_dma--;
+			}
+		} else {
+			while (nr_to_dma > 0) {
+				sg_set_page(sg_temp, ((struct buffer_head *)
+					(lbio->vec[n - nr_to_dma].page))->b_page, PAGE_SIZE, 0);
+				sg_temp = sg_next(sg_temp);
+				nr_to_dma--;
+			}
+		}
+
+		if (!dma_map_sg(nvmeq->q_dmadev, sg, n, DMA_TO_DEVICE)) {
+			printk(KERN_ERR "[AIOS ERROR] %s:%d\n", __func__, __LINE__);
+			goto abort_link;
+		}
+		lbio->vec[0].dma_addr = (dma_addr_t)sg;
+
+		ret = nvme_lbio_setup_prps(nvmeq->dev, sg, lbio, &prp1, &prp2);
+		if (ret) {
+			printk(KERN_ERR "[AIOS ERROR] %s:%d\n", __func__, __LINE__);
+abort_link:
+			if (prev_lbio)
+				prev_lbio->next = NULL;
+			goto abort_remaining_lbios;
+		}
+
+		cmd.rw.opcode = nvme_cmd_write;
+		cmd.rw.command_id = lbio_tag(lbio) | NVME_AIOS;
+		cmd.rw.nsid = cpu_to_le32(ns->head->ns_id);
+		cmd.rw.slba = cpu_to_le64(nvme_block_nr(ns, lbio->sector));
+		cmd.rw.dptr.prp1 = cpu_to_le64(prp1);
+		cmd.rw.dptr.prp2 = cpu_to_le64(prp2);
+		cmd.rw.length = 
+			cpu_to_le16(((lbio->vcnt * PAGE_SIZE) >> ns->lba_shift) - 1);
+		cmd.rw.control = 0;
+		cmd.rw.dsmgmt = 0;
+
+		spin_lock_irq(&nvmeq->sq_lock);
+		memcpy(&nvmeq->sq_cmds[nvmeq->sq_tail], &cmd, sizeof(cmd));
+		if (++nvmeq->sq_tail == nvmeq->q_depth)
+			nvmeq->sq_tail = 0;
+		if (nvme_dbbuf_update_and_check_event(nvmeq->sq_tail,
+						nvmeq->dbbuf_sq_db, nvmeq->dbbuf_sq_ei))
+			writel(nvmeq->sq_tail, nvmeq->q_db);
+		nvmeq->last_sq_tail = nvmeq->sq_tail;
+		spin_unlock_irq(&nvmeq->sq_lock);
+
+		prev_lbio = lbio;
+		lbio = lbio->next;
+	}
+
+	put_cpu_var(nvme_irq_queues);
+
+	return 0;
+
+abort_remaining_lbios:
+	put_cpu_var(nvme_irq_queues);
+	lbio_req_completion_error(lbio);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(nvme_AIOS_write);
+
+int nvme_lbio_submit_cmd(struct lbio *lbio, int flush_fua)
+{
+	struct nvme_queue *nvmeq = get_cpu_var(nvme_irq_queues);
+	struct nvme_ns *ns = list_entry(nvmeq->dev->ctrl.namespaces.next, struct nvme_ns, list);
+	struct nvme_command cmd;
+	memset(&cmd, 0, sizeof(cmd));
+
+	if (ns->ctrl->vwc && flush_fua) {
+		lbio_set_fua(lbio);
+		cmd.common.opcode = nvme_cmd_flush;
+		cmd.rw.command_id = lbio_tag(lbio) | NVME_AIOS;
+		cmd.common.nsid = cpu_to_le32(ns->head->ns_id);
+
+		spin_lock_irq(&nvmeq->sq_lock);
+		memcpy(&nvmeq->sq_cmds[nvmeq->sq_tail], &cmd, sizeof(cmd));
+		if (++nvmeq->sq_tail == nvmeq->q_depth)
+			nvmeq->sq_tail = 0;
+		if (nvme_dbbuf_update_and_check_event(nvmeq->sq_tail,
+						nvmeq->dbbuf_sq_db, nvmeq->dbbuf_sq_ei))
+			writel(nvmeq->sq_tail, nvmeq->q_db);
+		nvmeq->last_sq_tail = nvmeq->sq_tail;
+		spin_unlock_irq(&nvmeq->sq_lock);
+
+		goto flush_command;
+	}
+
+	while (lbio) {
+		cmd.rw.opcode = nvme_cmd_write;
+		cmd.rw.command_id = lbio_tag(lbio) | NVME_AIOS;
+		cmd.rw.nsid = cpu_to_le32(ns->head->ns_id);
+		cmd.rw.slba = cpu_to_le64(nvme_block_nr(ns, lbio->sector));
+		cmd.rw.dptr.prp1 = cpu_to_le64(cpu_to_le64(lbio->vec[0].dma_addr));
+		cmd.rw.dptr.prp2 = cpu_to_le64(0);
+		cmd.rw.length = 
+				cpu_to_le16(((lbio->vcnt * PAGE_SIZE) >> ns->lba_shift) - 1);
+		if (lbio_is_fua(lbio)) {
+			lbio_clear_fua(lbio);
+			cmd.rw.control = NVME_RW_FUA;
+		}
+		cmd.rw.dsmgmt = 0;
+
+		spin_lock_irq(&nvmeq->sq_lock);
+		memcpy(&nvmeq->sq_cmds[nvmeq->sq_tail], &cmd, sizeof(cmd));
+		if (++nvmeq->sq_tail == nvmeq->q_depth)
+			nvmeq->sq_tail = 0;
+		if (nvme_dbbuf_update_and_check_event(nvmeq->sq_tail,
+						nvmeq->dbbuf_sq_db, nvmeq->dbbuf_sq_ei))
+			writel(nvmeq->sq_tail, nvmeq->q_db);
+		nvmeq->last_sq_tail = nvmeq->sq_tail;
+		spin_unlock_irq(&nvmeq->sq_lock);
+
+		lbio = lbio->next;
+	}
+
+flush_command:
+	put_cpu_var(nvme_irq_queues);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(nvme_lbio_submit_cmd);
+
+int nvme_lbio_dma_mapping(struct lbio *lbio)
+{
+	struct nvme_queue *nvmeq = per_cpu(nvme_irq_queues, 0);
+	struct lbio *prev_lbio = NULL;
+	int ret;
+
+	while (lbio) {
+		int nr_to_dma = lbio->vcnt;
+		int n = nr_to_dma;
+		struct scatterlist *sg = kmalloc(sizeof(struct scatterlist) * n, GFP_KERNEL);
+		struct scatterlist *sg_temp;
+
+		sg_init_table(sg, n);
+		sg_temp = sg;
+		while (nr_to_dma > 0) {
+			sg_set_page(sg_temp, ((struct buffer_head *)
+					(lbio->vec[n - nr_to_dma].page))->b_page, PAGE_SIZE, 0);
+			sg_temp = sg_next(sg_temp);
+			nr_to_dma--;
+		}
+
+		if (!dma_map_sg(nvmeq->q_dmadev, sg, n, DMA_TO_DEVICE)) {
+			printk(KERN_ERR "[AIOS ERROR] %s:%d\n", __func__, __LINE__);
+			if (prev_lbio)
+				prev_lbio->next = NULL;
+			goto abort_remaining_lbios;
+		}
+		lbio->vec[0].dma_addr = (dma_addr_t)sg;
+
+		prev_lbio = lbio;
+		lbio = lbio->next;
+	}
+
+	return 0;
+
+abort_remaining_lbios:
+	lbio_req_completion_error(lbio);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(nvme_lbio_dma_mapping);
+
+void AIOS_lazy_dma_unmapping(void)
+{
+	struct lbio_final_list *final_list = this_cpu_ptr(&lbio_final_lists);
+	struct lbio_lazy_list *lazy_list;
+	struct lbio *temp, *lbio, *head;
+	LIST_HEAD(free_pages);
+	int nr_free = 0, i, lbios_to_stay = 0;
+	struct nvme_queue *nvmeq = per_cpu(nvme_irq_queues, 0);
+	struct nvme_dev *dev = nvmeq->dev;
+
+	unsigned long flags;
+	spin_lock_irqsave(&final_list->lock, flags);
+	head = final_list->lbio;
+	final_list->lbio = NULL;
+	spin_unlock(&final_list->lock);
+
+	lazy_list = &get_cpu_var(lbio_lazy_lists);
+	for (i = 0; i < lazy_list->nr_lbios; ++i){
+		lbio = lazy_list->lbios[i];
+		if (!lbio_is_pagecached(lbio))
+			lazy_list->lbios[lbios_to_stay++] = lbio;
+		else {
+			lbio->next = head;
+			head = lbio;
+		}
+	}
+	lazy_list->nr_lbios = lbios_to_stay;
+	put_cpu_var(lbio_lazy_lists);
+	local_irq_restore(flags);
+
+	lbio = head;
+	while (lbio) {
+		for (i = 0; i < lbio->vcnt; ++i) {
+			struct page *page = lbio->vec[i].page;
+			dma_addr_t dma_addr = lbio->vec[i].dma_addr;
+			AIOS_dma_unmap_page(dev->dev, dma_addr, PAGE_SIZE, DMA_FROM_DEVICE);
+
+			if (PageReuse(page)) {
+				ClearPageReuse(page);
+				ClearPageUptodate(page);
+				page->private = (dma_addr_t)AIOS_dma_map_page(dev->dev, page, 0,
+													PAGE_SIZE, DMA_FROM_DEVICE);
+				list_add(&page->lru, &free_pages);
+				nr_free++;
+			}
+		}
+		if (lbio->vcnt > LBIO_INLINE_VECS)
+			kfree(lbio->vec);
+
+		if (lbio->prp_list) {
+			int nprps = DIV_ROUND_UP(lbio->vcnt * PAGE_SIZE, dev->ctrl.page_size);
+			if (nprps <= (256 / 8)) 
+				dma_pool_free(dev->prp_small_pool, lbio->prp_list, lbio->prp_dma);
+			else
+				dma_pool_free(dev->prp_page_pool, lbio->prp_list, lbio->prp_dma);
+			lbio->prp_list = NULL;
+		}
+
+		temp = lbio->next;
+		lbio_clear_completed(lbio);
+		lbio_clear_pagecached(lbio);
+		lbio_clear_busy(lbio); /* clear busy at the very last */
+		lbio = temp;
+	}
+
+	if (nr_free)
+		refill_free_pages_lbio(&free_pages, nr_free);
+}
+EXPORT_SYMBOL(AIOS_lazy_dma_unmapping);
+
+void AIOS_refill_free_page(struct address_space *mapping)
+{
+	LIST_HEAD(free_pages);
+	struct scatterlist *sg = NULL, *sg_temp = NULL;
+	struct list_head *p;
+	struct lbio_free_page_pool *free_page_pool = &get_cpu_var(lbio_free_page_pools);
+	int nr_to_alloc = LBIO_MAX_FREE_PAGES - free_page_pool->nr_pages;
+	int n = nr_to_alloc;
+	put_cpu_var(lbio_free_page_pools);
+
+	if (n <= 0)
+		return;
+
+	sg = kmalloc(sizeof(struct scatterlist) * n, GFP_KERNEL);
+	sg_init_table(sg, n);
+	sg_temp = sg;
+
+	while (nr_to_alloc > 0) {
+		struct page *page = __page_cache_alloc(readahead_gfp_mask(mapping));
+		if (!page)
+			panic("[AIOS ERROR] %s:%d page allocation failed\n", __func__, __LINE__);
+
+		sg_set_page(sg_temp, page, PAGE_SIZE, 0);
+		sg_temp = sg_next(sg_temp);
+		list_add(&page->lru, &free_pages);
+		nr_to_alloc--;
+	}
+
+	if (!AIOS_dma_map_sg(free_page_pool->dev, sg, n, DMA_FROM_DEVICE)) {
+		printk(KERN_ERR "[AIOS ERROR] %s:%d\n", __func__, __LINE__);
+		goto out;
+	}
+	sg_temp = sg;
+	list_for_each_prev(p, &free_pages) {
+		struct page *page = list_entry(p, struct page, lru);
+		page->private = sg_temp->dma_address;
+		sg_temp = sg_next(sg_temp);
+	}
+
+out:
+	kfree(sg);
+	refill_free_pages_lbio(&free_pages, n);
+}
+EXPORT_SYMBOL(AIOS_refill_free_page);
+#endif
 
 MODULE_AUTHOR("Matthew Wilcox <willy@linux.intel.com>");
 MODULE_LICENSE("GPL");

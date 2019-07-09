@@ -131,6 +131,10 @@ struct request {
 	struct blk_mq_ctx *mq_ctx;
 	struct blk_mq_hw_ctx *mq_hctx;
 
+#ifdef CONFIG_READ_TIMESTAMP
+	unsigned long long *breakdown;
+#endif
+
 	unsigned int cmd_flags;		/* op and common flags */
 	req_flags_t rq_flags;
 
@@ -1121,6 +1125,9 @@ extern void blk_set_queue_dying(struct request_queue *);
  */
 struct blk_plug {
 	struct list_head mq_list; /* blk-mq requests */
+#ifdef CONFIG_AIOS
+	struct list_head lbio_list; /* lbio requests */
+#endif
 	struct list_head cb_list; /* md requires an unplug callback */
 	unsigned short rq_count;
 	bool multiple_queues;
@@ -1163,6 +1170,7 @@ static inline bool blk_needs_flush_plug(struct task_struct *tsk)
 
 	return plug &&
 		 (!list_empty(&plug->mq_list) ||
+		!list_empty(&plug->lbio_list) ||
 		 !list_empty(&plug->cb_list));
 }
 

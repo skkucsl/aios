@@ -54,6 +54,13 @@ DECLARE_EVENT_CLASS(jbd2_commit,
 		  __entry->transaction, __entry->sync_commit)
 );
 
+DEFINE_EVENT(jbd2_commit, jbd2_start_aios_commit,
+
+	TP_PROTO(journal_t *journal, transaction_t *commit_transaction),
+
+	TP_ARGS(journal, commit_transaction)
+);
+
 DEFINE_EVENT(jbd2_commit, jbd2_start_commit,
 
 	TP_PROTO(journal_t *journal, transaction_t *commit_transaction),

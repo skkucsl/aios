@@ -34,6 +34,8 @@
 
 #include "internal.h"
 
+#include "./ext4/ext4.h"
+
 int do_truncate(struct dentry *dentry, loff_t length, unsigned int time_attrs,
 	struct file *filp)
 {
@@ -1067,6 +1069,13 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 		} else {
 			fsnotify_open(f);
 			fd_install(fd, f);
+#ifdef CONFIG_AIOS
+			if (flags & O_AIOS) {
+				atomic_inc(&f->f_mapping->host->aios_count);
+				f->f_flags |= O_AIOS;
+				ext4_extent_preload(f->f_mapping);
+			}
+#endif
 		}
 	}
 	putname(tmp);
@@ -1135,6 +1144,11 @@ int filp_close(struct file *filp, fl_owner_t id)
 		printk(KERN_ERR "VFS: Close: file count is 0\n");
 		return 0;
 	}
+
+#ifdef CONFIG_AIOS
+	if (filp->f_flags & O_AIOS)
+		atomic_dec(&filp->f_mapping->host->aios_count);
+#endif
 
 	if (filp->f_op->flush)
 		retval = filp->f_op->flush(filp, id);

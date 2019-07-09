@@ -361,6 +361,10 @@ struct address_space_operations {
 	 */
 	int (*readpages)(struct file *filp, struct address_space *mapping,
 			struct list_head *pages, unsigned nr_pages);
+#ifdef CONFIG_AIOS
+	int (*AIOS_readpages)(struct file *filp, struct address_space *mapping,
+			struct list_head *pages, unsigned nr_pages, void **lbio);
+#endif
 
 	int (*write_begin)(struct file *, struct address_space *mapping,
 				loff_t pos, unsigned len, unsigned flags,
@@ -612,6 +616,7 @@ struct inode {
 	kuid_t			i_uid;
 	kgid_t			i_gid;
 	unsigned int		i_flags;
+	atomic_t aios_count;
 
 #ifdef CONFIG_FS_POSIX_ACL
 	struct posix_acl	*i_acl;
@@ -1804,6 +1809,7 @@ struct file_operations {
 	int (*flush) (struct file *, fl_owner_t id);
 	int (*release) (struct inode *, struct file *);
 	int (*fsync) (struct file *, loff_t, loff_t, int datasync);
+	int (*AIOS_fsync) (struct file *, loff_t, loff_t, int datasync);
 	int (*fasync) (int, struct file *, int);
 	int (*lock) (struct file *, int, struct file_lock *);
 	ssize_t (*sendpage) (struct file *, struct page *, int, size_t, loff_t *, int);
@@ -2721,6 +2727,8 @@ extern void __filemap_set_wb_err(struct address_space *mapping, int err);
 extern int __must_check file_fdatawait_range(struct file *file, loff_t lstart,
 						loff_t lend);
 extern int __must_check file_check_and_advance_wb_err(struct file *file);
+extern int __must_check file_write_range(struct file *file,
+						loff_t start, loff_t end);
 extern int __must_check file_write_and_wait_range(struct file *file,
 						loff_t start, loff_t end);
 

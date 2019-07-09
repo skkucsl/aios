@@ -3649,6 +3649,76 @@ static int iommu_no_mapping(struct device *dev)
 	return 0;
 }
 
+static dma_addr_t __AIOS_intel_map_page(struct device *dev, struct page *page,
+				   unsigned long offset, size_t size, int dir, u64 dma_mask)
+{
+	phys_addr_t paddr = page_to_phys(page) + offset;
+	struct dmar_domain *domain;
+	phys_addr_t start_paddr;
+	unsigned long iova_pfn;
+	int prot = 0;
+	int ret;
+	struct intel_iommu *iommu;
+	unsigned long paddr_pfn = paddr >> PAGE_SHIFT;
+
+	BUG_ON(dir == DMA_NONE);
+
+	if (iommu_no_mapping(dev))
+		return paddr;
+
+	domain = get_valid_domain_for_dev(dev);
+	if (!domain)
+		return DMA_MAPPING_ERROR;
+
+	iommu = domain_get_iommu(domain);
+	size = aligned_nrpages(paddr, size);
+
+	iova_pfn = intel_alloc_iova(dev, domain, dma_to_mm_pfn(size), dma_mask);
+	if (!iova_pfn)
+		goto error;
+
+	atomic_set(&(find_iova(&domain->iovad, iova_pfn))->npages, 1);
+
+	/*
+	 * Check if DMAR supports zero-length reads on write only
+	 * mappings..
+	 */
+	if (dir == DMA_TO_DEVICE || dir == DMA_BIDIRECTIONAL || \
+			!cap_zlr(iommu->cap))
+		prot |= DMA_PTE_READ;
+	if (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL)
+		prot |= DMA_PTE_WRITE;
+	/*
+	 * paddr - (paddr + size) might be partial page, we should map the whole
+	 * page.  Note: if two part of one page are separately mapped, we
+	 * might have two guest_addr mapping to the same host paddr, but this
+	 * is not a big problem
+	 */
+	ret = domain_pfn_mapping(domain, mm_to_dma_pfn(iova_pfn),
+				 mm_to_dma_pfn(paddr_pfn), size, prot);
+	if (ret)
+		goto error;
+
+	start_paddr = (phys_addr_t)iova_pfn << PAGE_SHIFT;
+	start_paddr += paddr & ~PAGE_MASK;
+	return start_paddr;
+
+error:
+	if (iova_pfn)
+		free_iova_fast(&domain->iovad, iova_pfn, dma_to_mm_pfn(size));
+	pr_err("Device %s request: %zx@%llx dir %d --- failed\n",
+		dev_name(dev), size, (unsigned long long)paddr, dir);
+	return DMA_MAPPING_ERROR;
+}
+
+static dma_addr_t AIOS_intel_map_page(struct device *dev, struct page *page,
+				 unsigned long offset, size_t size,
+				 enum dma_data_direction dir,
+				 unsigned long attrs)
+{
+	return __AIOS_intel_map_page(dev, page, offset, size, dir, *dev->dma_mask);
+}
+
 static dma_addr_t __intel_map_page(struct device *dev, struct page *page,
 				   unsigned long offset, size_t size, int dir,
 				   u64 dma_mask)
@@ -3716,6 +3786,63 @@ static dma_addr_t intel_map_page(struct device *dev, struct page *page,
 				 unsigned long attrs)
 {
 	return __intel_map_page(dev, page, offset, size, dir, *dev->dma_mask);
+}
+
+static void AIOS_intel_unmap(struct device *dev, dma_addr_t dev_addr, size_t size)
+{
+	struct dmar_domain *domain;
+	unsigned long start_pfn, last_pfn;
+	unsigned long nrpages;
+	unsigned long iova_pfn;
+	struct intel_iommu *iommu;
+	struct page *freelist;
+	struct iova *iova;
+
+	if (iommu_no_mapping(dev))
+		return;
+
+	domain = find_domain(dev);
+	BUG_ON(!domain);
+
+	iommu = domain_get_iommu(domain);
+
+	iova_pfn = IOVA_PFN(dev_addr);
+
+	iova = find_iova(&domain->iovad, iova_pfn);
+	if (!atomic_dec_and_test(&iova->npages))
+		return;
+
+	start_pfn = mm_to_dma_pfn(iova->pfn_lo);
+	last_pfn = mm_to_dma_pfn(iova->pfn_hi + 1) - 1;
+	iova_pfn = iova->pfn_lo;
+	nrpages = last_pfn - start_pfn + 1;
+
+	pr_debug("Device %s unmapping: pfn %lx-%lx\n",
+		 dev_name(dev), start_pfn, last_pfn);
+
+	freelist = domain_unmap(domain, start_pfn, last_pfn);
+
+	if (intel_iommu_strict) {
+		iommu_flush_iotlb_psi(iommu, domain, start_pfn,
+				      nrpages, !freelist, 0);
+		/* free iova */
+		free_iova_fast(&domain->iovad, iova_pfn, dma_to_mm_pfn(nrpages));
+		dma_free_pagelist(freelist);
+	} else {
+		queue_iova(&domain->iovad, iova_pfn, nrpages,
+			   (unsigned long)freelist);
+		/*
+		 * queue up the release of the unmap to save the 1/6th of the
+		 * cpu used up by the iotlb flush operation...
+		 */
+	}
+}
+
+static void AIOS_intel_unmap_page(struct device *dev, dma_addr_t dev_addr,
+			     size_t size, enum dma_data_direction dir,
+			     unsigned long attrs)
+{
+	AIOS_intel_unmap(dev, dev_addr, size);
 }
 
 static void intel_unmap(struct device *dev, dma_addr_t dev_addr, size_t size)
@@ -3860,6 +3987,65 @@ static int intel_nontranslate_map_sg(struct device *hddev,
 	return nelems;
 }
 
+static int AIOS_intel_map_sg(struct device *dev, struct scatterlist *sglist, int nelems,
+			enum dma_data_direction dir, unsigned long attrs)
+{
+	int i;
+	struct dmar_domain *domain;
+	size_t size = 0;
+	int prot = 0;
+	unsigned long iova_pfn;
+	int ret;
+	struct scatterlist *sg;
+	unsigned long start_vpfn;
+	struct intel_iommu *iommu;
+
+	BUG_ON(dir == DMA_NONE);
+	if (iommu_no_mapping(dev))
+		return intel_nontranslate_map_sg(dev, sglist, nelems, dir);
+
+	domain = get_valid_domain_for_dev(dev);
+	if (!domain)
+		return 0;
+
+	iommu = domain_get_iommu(domain);
+
+	for_each_sg(sglist, sg, nelems, i)
+		size += aligned_nrpages(sg->offset, sg->length);
+
+	iova_pfn = intel_alloc_iova(dev, domain, dma_to_mm_pfn(size),
+				*dev->dma_mask);
+	if (!iova_pfn) {
+		sglist->dma_length = 0;
+		return 0;
+	}
+
+	atomic_set(&(find_iova(&domain->iovad, iova_pfn))->npages, nelems);
+
+	/*
+	 * Check if DMAR supports zero-length reads on write only
+	 * mappings..
+	 */
+	if (dir == DMA_TO_DEVICE || dir == DMA_BIDIRECTIONAL || \
+			!cap_zlr(iommu->cap))
+		prot |= DMA_PTE_READ;
+	if (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL)
+		prot |= DMA_PTE_WRITE;
+
+	start_vpfn = mm_to_dma_pfn(iova_pfn);
+
+	ret = domain_sg_mapping(domain, start_vpfn, sglist, size, prot);
+	if (unlikely(ret)) {
+		dma_pte_free_pagetable(domain, start_vpfn,
+				       start_vpfn + size - 1,
+				       agaw_to_level(domain->agaw) + 1);
+		free_iova_fast(&domain->iovad, iova_pfn, dma_to_mm_pfn(size));
+		return 0;
+	}
+
+	return nelems;
+}
+
 static int intel_map_sg(struct device *dev, struct scatterlist *sglist, int nelems,
 			enum dma_data_direction dir, unsigned long attrs)
 {
@@ -3925,6 +4111,9 @@ static const struct dma_map_ops intel_dma_ops = {
 	.map_page = intel_map_page,
 	.unmap_page = intel_unmap_page,
 	.dma_supported = dma_direct_supported,
+	.AIOS_map_sg = AIOS_intel_map_sg,
+	.AIOS_map_page = AIOS_intel_map_page,
+	.AIOS_unmap_page = AIOS_intel_unmap_page,
 };
 
 static inline int iommu_domain_cache_init(void)

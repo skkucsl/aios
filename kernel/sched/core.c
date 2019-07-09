@@ -11,6 +11,8 @@
 
 #include <linux/kcov.h>
 
+#include <linux/lbio.h>
+
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
 
@@ -3524,6 +3526,7 @@ asmlinkage __visible void __sched schedule(void)
 	struct task_struct *tsk = current;
 
 	sched_submit_work(tsk);
+
 	do {
 		preempt_disable();
 		__schedule(false);

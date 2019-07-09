@@ -19,6 +19,7 @@
 
 /* iova structure */
 struct iova {
+	atomic_t npages;
 	struct rb_node	node;
 	unsigned long	pfn_hi; /* Highest allocated pfn */
 	unsigned long	pfn_lo; /* Lowest allocated pfn */

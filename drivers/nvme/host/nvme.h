@@ -573,6 +573,10 @@ static inline struct nvme_ns *nvme_get_ns_from_dev(struct device *dev)
 	return dev_to_disk(dev)->private_data;
 }
 
+#ifdef CONFIG_AIOS
+blk_status_t nvme_AIOS_error_status(blk_status_t status);
+#endif
+
 int __init nvme_core_init(void);
 void __exit nvme_core_exit(void);
 

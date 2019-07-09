@@ -560,8 +560,13 @@ static int __jbd2_journal_force_commit(journal_t *journal)
 	read_lock(&journal->j_state_lock);
 	if (journal->j_running_transaction && !current->journal_info) {
 		transaction = journal->j_running_transaction;
-		if (!tid_geq(journal->j_commit_request, transaction->t_tid))
+		if (!tid_geq(journal->j_commit_request, transaction->t_tid)) {
 			need_to_start = 1;
+#ifdef CONFIG_AIOS
+			if (journal->aios)
+				transaction->aios = 1;
+#endif
+		}
 	} else if (journal->j_committing_transaction)
 		transaction = journal->j_committing_transaction;
 
@@ -574,6 +579,10 @@ static int __jbd2_journal_force_commit(journal_t *journal)
 	read_unlock(&journal->j_state_lock);
 	if (need_to_start)
 		jbd2_log_start_commit(journal, tid);
+#ifdef CONFIG_AIOS
+	if (journal->aios)
+		return tid;
+#endif
 	ret = jbd2_log_wait_commit(journal, tid);
 	if (!ret)
 		ret = 1;
@@ -610,6 +619,12 @@ int jbd2_journal_force_commit(journal_t *journal)
 
 	J_ASSERT(!current->journal_info);
 	ret = __jbd2_journal_force_commit(journal);
+#ifdef CONFIG_AIOS
+	if (journal->aios) {
+		journal->aios = 0;
+		return ret;
+	}
+#endif
 	if (ret > 0)
 		ret = 0;
 	return ret;
@@ -750,6 +765,31 @@ int jbd2_transaction_committed(journal_t *journal, tid_t tid)
 	return ret;
 }
 EXPORT_SYMBOL(jbd2_transaction_committed);
+
+int jbd2_early_wakeup_transaction(journal_t *journal, tid_t tid)
+{
+	int	need_to_wait = 1;
+
+	read_lock(&journal->j_state_lock);
+	if (journal->j_running_transaction &&
+	    journal->j_running_transaction->t_tid == tid) {
+		if (journal->j_commit_request != tid) {
+			/* transaction not yet started, so request it */
+			journal->j_running_transaction->aios = 1;
+			read_unlock(&journal->j_state_lock);
+			jbd2_log_start_commit(journal, tid);
+			goto wait_commit;
+		}
+	} else if (!(journal->j_committing_transaction &&
+		     journal->j_committing_transaction->t_tid == tid))
+		need_to_wait = 0;
+	read_unlock(&journal->j_state_lock);
+	if (!need_to_wait)
+		return 0;
+wait_commit:
+	return 1;
+}
+EXPORT_SYMBOL(jbd2_early_wakeup_transaction);
 
 /*
  * When this function returns the transaction corresponding to tid

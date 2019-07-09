@@ -21,6 +21,7 @@
 #include <linux/mm_inline.h>
 #include <linux/blk-cgroup.h>
 #include <linux/fadvise.h>
+#include <linux/lbio.h>
 
 #include "internal.h"
 
@@ -113,11 +114,26 @@ EXPORT_SYMBOL(read_cache_pages);
 static int read_pages(struct address_space *mapping, struct file *filp,
 		struct list_head *pages, unsigned int nr_pages, gfp_t gfp)
 {
+	struct lbio *lbio = NULL;
 	struct blk_plug plug;
 	unsigned page_idx;
 	int ret;
 
 	blk_start_plug(&plug);
+
+#ifdef CONFIG_AIOS
+	if (filp->f_flags & O_AIOS && mapping->a_ops->AIOS_readpages) {
+		ret = mapping->a_ops->AIOS_readpages(filp, mapping, pages, nr_pages, (void *)&lbio);
+		/* Clean up the remaining pages */
+		put_pages_list(pages);
+
+		blk_finish_plug(&plug);
+		AIOS_lazy_page_cache(mapping, lbio);
+		AIOS_lazy_dma_unmapping();
+		AIOS_refill_free_page(mapping);
+		return ret;
+	}
+#endif
 
 	if (mapping->a_ops->readpages) {
 		ret = mapping->a_ops->readpages(filp, mapping, pages, nr_pages);
@@ -190,9 +206,25 @@ unsigned int __do_page_cache_readahead(struct address_space *mapping,
 			continue;
 		}
 
+#ifdef CONFIG_AIOS
+		if (filp->f_flags & O_AIOS) {
+			page = AIOS_get_free_page();
+			if (!page) {
+				page = __page_cache_alloc(gfp_mask);
+				if (!page)
+					break;
+			}
+			__SetPageLocked(page);
+		} else {
+			page = __page_cache_alloc(gfp_mask);
+			if (!page)
+				break;
+		}
+#else
 		page = __page_cache_alloc(gfp_mask);
 		if (!page)
 			break;
+#endif
 		page->index = page_offset;
 		list_add(&page->lru, &page_pool);
 		if (page_idx == nr_to_read - lookahead_size)

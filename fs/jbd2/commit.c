@@ -24,11 +24,29 @@
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 #include <linux/bitops.h>
+#include <linux/lbio.h>
 #include <trace/events/jbd2.h>
 
 /*
  * IO end handler for temporary buffer_heads handling writes to the journal.
  */
+
+#ifdef CONFIG_AIOS
+static void end_lbio_bh_io_sync(struct lbio *lbio)
+{
+	int i;
+
+<<<<<<< HEAD
+	for (i = 0; i < lbio->vcnt; ++i){
+=======
+	for (i = 0; lbio->vcnt; ++i){
+>>>>>>> 70721a85a2489683591d2143db970bfa8e6f4bab
+		struct buffer_head *bh = (struct buffer_head *)(lbio->vec[i].page);
+		bh->b_end_io(bh, !lbio->status);
+	}
+}
+#endif
+
 static void journal_end_buffer_io_sync(struct buffer_head *bh, int uptodate)
 {
 	struct buffer_head *orig_bh = bh->b_private;
@@ -104,6 +122,50 @@ static void jbd2_commit_block_csum_set(journal_t *j, struct buffer_head *bh)
 	csum = jbd2_chksum(j, j->j_csum_seed, bh->b_data, j->j_blocksize);
 	h->h_chksum[0] = cpu_to_be32(csum);
 }
+
+#ifdef CONFIG_AIOS
+static int journal_make_commit_record(journal_t *journal,
+					transaction_t *commit_transaction,
+					struct buffer_head **cbh,
+					__u32 crc32_sum)
+{
+	struct commit_header *tmp;
+	struct buffer_head *bh;
+	int ret;
+	struct timespec64 now;
+
+	*cbh = NULL;
+
+	if (is_journal_aborted(journal))
+		return 0;
+
+	bh = jbd2_journal_get_descriptor_buffer(commit_transaction,
+						JBD2_COMMIT_BLOCK);
+	if (!bh)
+		return 1;
+
+	tmp = (struct commit_header *)bh->b_data;
+	ktime_get_coarse_real_ts64(&now);
+	tmp->h_commit_sec = cpu_to_be64(now.tv_sec);
+	tmp->h_commit_nsec = cpu_to_be32(now.tv_nsec);
+
+	if (jbd2_has_feature_checksum(journal)) {
+		tmp->h_chksum_type 	= JBD2_CRC32_CHKSUM;
+		tmp->h_chksum_size 	= JBD2_CRC32_CHKSUM_SIZE;
+		tmp->h_chksum[0] 	= cpu_to_be32(crc32_sum);
+	}
+	jbd2_commit_block_csum_set(journal, bh);
+
+	BUFFER_TRACE(bh, "submit commit block");
+	lock_buffer(bh);
+	clear_buffer_dirty(bh);
+	set_buffer_uptodate(bh);
+	bh->b_end_io = journal_end_buffer_io_sync;
+
+	*cbh = bh;
+	return ret;
+}
+#endif
 
 /*
  * Done it all: now submit the commit record.  We should have
@@ -335,6 +397,7 @@ static void jbd2_block_tag_csum_set(journal_t *j, journal_block_tag_t *tag,
 	else
 		tag->t_checksum = cpu_to_be16(csum32);
 }
+
 /*
  * jbd2_journal_commit_transaction
  *
@@ -371,6 +434,11 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 	int csum_size = 0;
 	LIST_HEAD(io_bufs);
 	LIST_HEAD(log_bufs);
+
+#ifdef CONFIG_AIOS
+	struct lbio *lbio = NULL;
+	struct lbio *first_lbio = NULL;
+#endif
 
 	if (jbd2_journal_has_csum_v2or3(journal))
 		csum_size = sizeof(struct jbd2_journal_block_tail);
@@ -699,6 +767,7 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 start_journal_io:
 			for (i = 0; i < bufs; i++) {
 				struct buffer_head *bh = wbuf[i];
+				unsigned long long lbn = -1;
 				/*
 				 * Compute checksum.
 				 */
@@ -711,7 +780,41 @@ start_journal_io:
 				clear_buffer_dirty(bh);
 				set_buffer_uptodate(bh);
 				bh->b_end_io = journal_end_buffer_io_sync;
+#ifdef CONFIG_AIOS
+				if (commit_transaction->aios) {
+					if (lbn == -1 || lbn + 1 != bh->b_blocknr) {
+						if (!lbio) {
+							lbio = lbio_alloc(GFP_NOIO, bufs);
+							if (!first_lbio) {
+								first_lbio = lbio;
+								list_add_tail(&first_lbio->list, &plug.lbio_list);
+							}
+						} else {
+new_lbio:
+							lbio->next = lbio_alloc(GFP_NOIO, bufs);
+							lbio = lbio->next;
+						}
+						BUG_ON(!lbio);
+
+						lbio_set_write(lbio);
+						lbio->bi_end_io = end_lbio_bh_io_sync;
+						lbio->sector = bh->b_blocknr * (bh->b_size >> 9);
+						if (bh->b_bdev->bd_partno) {
+							struct hd_struct *p;
+							rcu_read_lock();
+							p = __disk_get_part(bh->b_bdev->bd_disk, bh->b_bdev->bd_partno);
+							lbio->sector += p->start_sect;
+							rcu_read_unlock();
+						}
+					}
+					if (lbio_add_bh((void *)lbio, bh))
+						goto new_lbio;
+					lbn = bh->b_blocknr;
+				} else
+					submit_bh(REQ_OP_WRITE, REQ_SYNC, bh);
+#else
 				submit_bh(REQ_OP_WRITE, REQ_SYNC, bh);
+#endif
 			}
 			cond_resched();
 			stats.run.rs_blocks_logged += bufs;
@@ -723,6 +826,19 @@ start_journal_io:
 		}
 	}
 
+#ifdef CONFIG_AIOS
+	if (!commit_transaction->aios) {
+		err = journal_finish_inode_data_buffers(journal, commit_transaction);
+		if (err) {
+			printk(KERN_WARNING
+				"JBD2: Detected IO errors while flushing file data "
+			       "on %s\n", journal->j_devname);
+			if (journal->j_flags & JBD2_ABORT_ON_SYNCDATA_ERR)
+				jbd2_journal_abort(journal, err);
+			err = 0;
+		}
+	}
+#else
 	err = journal_finish_inode_data_buffers(journal, commit_transaction);
 	if (err) {
 		printk(KERN_WARNING
@@ -732,6 +848,7 @@ start_journal_io:
 			jbd2_journal_abort(journal, err);
 		err = 0;
 	}
+#endif
 
 	/*
 	 * Get current oldest transaction in the log before we issue flush
@@ -776,6 +893,40 @@ start_journal_io:
 	}
 
 	blk_finish_plug(&plug);
+
+#ifdef CONFIG_AIOS
+	if (commit_transaction->aios) {
+		if (!jbd2_has_feature_async_commit(journal)) {
+			journal_make_commit_record(journal, commit_transaction,
+							&cbh, crc32_sum);
+			lbio = lbio_alloc(GFP_NOIO, 1);
+			BUG_ON(!lbio);
+
+			lbio_set_write(lbio);
+			lbio->bi_end_io = end_lbio_bh_io_sync;
+			lbio->sector = cbh->b_blocknr * (cbh->b_size >> 9);
+			if (cbh->b_bdev->bd_partno) {
+				struct hd_struct *p;
+				rcu_read_lock();
+				p = __disk_get_part(cbh->b_bdev->bd_disk, cbh->b_bdev->bd_partno);
+				lbio->sector += p->start_sect;
+				rcu_read_unlock();
+			}
+			lbio_add_bh((void *)lbio, cbh);
+			nvme_lbio_dma_mapping(lbio);
+		}
+
+		err = journal_finish_inode_data_buffers(journal, commit_transaction);
+		if (err) {
+			printk(KERN_WARNING
+				"JBD2: Detected IO errors while flushing file data "
+			       "on %s\n", journal->j_devname);
+			if (journal->j_flags & JBD2_ABORT_ON_SYNCDATA_ERR)
+				jbd2_journal_abort(journal, err);
+			err = 0;
+		}
+	}
+#endif
 
 	/* Lo and behold: we have just managed to send a transaction to
            the log.  Before we can commit it, wait for the IO so far to
@@ -860,8 +1011,16 @@ start_journal_io:
 	write_unlock(&journal->j_state_lock);
 
 	if (!jbd2_has_feature_async_commit(journal)) {
+#ifdef CONFIG_AIOS
+		if (commit_transaction->aios)
+			err = nvme_lbio_submit_cmd(lbio, REQ_PREFLUSH | REQ_FUA);
+		else
+			err = journal_submit_commit_record(journal, commit_transaction,
+						&cbh, crc32_sum);
+#else
 		err = journal_submit_commit_record(journal, commit_transaction,
 						&cbh, crc32_sum);
+#endif
 		if (err)
 			__jbd2_journal_abort_hard(journal);
 	}

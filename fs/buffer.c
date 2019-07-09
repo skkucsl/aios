@@ -45,6 +45,7 @@
 #include <linux/bit_spinlock.h>
 #include <linux/pagevec.h>
 #include <linux/sched/mm.h>
+#include <linux/lbio.h>
 #include <trace/events/block.h>
 
 static int fsync_buffers_list(spinlock_t *lock, struct list_head *list);
@@ -3459,3 +3460,22 @@ void __init buffer_init(void)
 					NULL, buffer_exit_cpu_dead);
 	WARN_ON(ret < 0);
 }
+
+//int lbio_add_bh(struct lbio *lbio, struct buffer_head *bh)
+int lbio_add_bh(void *_lbio, struct buffer_head *bh)
+{
+	struct lbio *lbio = (struct lbio *)_lbio;
+
+	if (!lbio_add_write_bh(lbio, bh))
+		return 1;
+
+	BUG_ON(!buffer_locked(bh));
+	BUG_ON(!buffer_mapped(bh));
+	BUG_ON(!bh->b_end_io);
+	BUG_ON(buffer_delay(bh));
+	BUG_ON(buffer_unwritten(bh));
+	clear_buffer_write_io_error(bh);
+
+	return 0;
+}
+EXPORT_SYMBOL(lbio_add_bh);

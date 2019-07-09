@@ -128,6 +128,7 @@ int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	ret = file_write_and_wait_range(file, start, end);
 	if (ret)
 		return ret;
+
 	/*
 	 * data=writeback,ordered:
 	 *  The caller's filemap_fdatawrite()/wait will sync the data.
@@ -152,6 +153,7 @@ int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	    !jbd2_trans_will_send_data_barrier(journal, commit_tid))
 		needs_barrier = true;
 	ret = jbd2_complete_transaction(journal, commit_tid);
+
 	if (needs_barrier) {
 	issue_flush:
 		err = blkdev_issue_flush(inode->i_sb->s_bdev, GFP_KERNEL, NULL);
@@ -165,3 +167,88 @@ out:
 	trace_ext4_sync_file_exit(inode, ret);
 	return ret;
 }
+
+#ifdef CONFIG_AIOS
+int ext4_AIOS_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
+{
+	struct inode *inode = file->f_mapping->host;
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	journal_t *journal = EXT4_SB(inode->i_sb)->s_journal;
+	int ret = 0, err, wait = 0;
+	tid_t commit_tid;
+	bool needs_barrier = false;
+
+	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
+		return -EIO;
+
+	J_ASSERT(ext4_journal_current_handle() == NULL);
+
+	trace_ext4_sync_file_enter(file, datasync);
+
+	if (sb_rdonly(inode->i_sb)) {
+		/* Make sure that we read updated s_mount_flags value */
+		smp_rmb();
+		if (EXT4_SB(inode->i_sb)->s_mount_flags & EXT4_MF_FS_ABORTED)
+			ret = -EROFS;
+		goto out;
+	}
+
+	if (!journal) {
+		ret = __generic_file_fsync(file, start, end, datasync);
+		if (!ret)
+			ret = ext4_sync_parent(inode);
+		if (test_opt(inode->i_sb, BARRIER))
+			goto issue_flush;
+		goto out;
+	}
+
+	ret = file_write_range(file, start, end);
+	if (ret) {
+		printk(KERN_ERR "[AIOS ERROR] %s:%d ret %d\n", __func__, __LINE__, ret);
+		return ret;
+	}
+
+	if (ext4_should_journal_data(inode)) {
+		int tid;
+		EXT4_SB(inode->i_sb)->s_journal->aios = 1;
+		tid = ext4_force_commit(inode->i_sb);
+		ret = filemap_fdatawait_range(inode->i_mapping, start, end);
+		if (ret) {
+			printk(KERN_ERR "[AIOS ERROR] %s:%d ret %d\n", __func__, __LINE__, ret);
+			return ret;
+		}
+		ret = jbd2_log_wait_commit(journal, tid);
+
+		goto out;
+	}
+
+	commit_tid = datasync ? ei->i_datasync_tid : ei->i_sync_tid;
+	if (journal->j_flags & JBD2_BARRIER &&
+	    !jbd2_trans_will_send_data_barrier(journal, commit_tid))
+		needs_barrier = true;
+	wait = jbd2_early_wakeup_transaction(journal, commit_tid);
+
+	ret = filemap_fdatawait_range(inode->i_mapping, start, end);
+	if (ret) {
+		printk(KERN_ERR "[AIOS ERROR] %s:%d ret %d\n", __func__, __LINE__, ret);
+		return ret;
+	}
+
+	if (wait)
+		wait = jbd2_log_wait_commit(journal, commit_tid);
+
+	if (needs_barrier) {
+	issue_flush:
+		err = blkdev_issue_flush(inode->i_sb->s_bdev, GFP_KERNEL, NULL);
+		if (!wait)
+			wait = err;
+	}
+
+out:
+	err = file_check_and_advance_wb_err(file);
+	if (ret == 0)
+		ret = err;
+	trace_ext4_sync_file_exit(inode, ret);
+	return ret;
+}
+#endif
