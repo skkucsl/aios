@@ -24,7 +24,9 @@
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 #include <linux/bitops.h>
+#ifdef CONFIG_AIOS
 #include <linux/lbio.h>
+#endif
 #include <trace/events/jbd2.h>
 
 /*
@@ -36,11 +38,7 @@ static void end_lbio_bh_io_sync(struct lbio *lbio)
 {
 	int i;
 
-<<<<<<< HEAD
 	for (i = 0; i < lbio->vcnt; ++i){
-=======
-	for (i = 0; lbio->vcnt; ++i){
->>>>>>> 70721a85a2489683591d2143db970bfa8e6f4bab
 		struct buffer_head *bh = (struct buffer_head *)(lbio->vec[i].page);
 		bh->b_end_io(bh, !lbio->status);
 	}
@@ -767,7 +765,9 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 start_journal_io:
 			for (i = 0; i < bufs; i++) {
 				struct buffer_head *bh = wbuf[i];
+#ifdef CONFIG_AIOS
 				unsigned long long lbn = -1;
+#endif
 				/*
 				 * Compute checksum.
 				 */

@@ -21,7 +21,9 @@
 #include <linux/mm_inline.h>
 #include <linux/blk-cgroup.h>
 #include <linux/fadvise.h>
+#ifdef CONFIG_AIOS
 #include <linux/lbio.h>
+#endif
 
 #include "internal.h"
 
@@ -114,7 +116,9 @@ EXPORT_SYMBOL(read_cache_pages);
 static int read_pages(struct address_space *mapping, struct file *filp,
 		struct list_head *pages, unsigned int nr_pages, gfp_t gfp)
 {
+#ifdef CONFIG_AIOS
 	struct lbio *lbio = NULL;
+#endif
 	struct blk_plug plug;
 	unsigned page_idx;
 	int ret;

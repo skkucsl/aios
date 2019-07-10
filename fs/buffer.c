@@ -45,7 +45,9 @@
 #include <linux/bit_spinlock.h>
 #include <linux/pagevec.h>
 #include <linux/sched/mm.h>
+#ifdef CONFIG_AIOS
 #include <linux/lbio.h>
+#endif
 #include <trace/events/block.h>
 
 static int fsync_buffers_list(spinlock_t *lock, struct list_head *list);
@@ -3461,7 +3463,7 @@ void __init buffer_init(void)
 	WARN_ON(ret < 0);
 }
 
-//int lbio_add_bh(struct lbio *lbio, struct buffer_head *bh)
+#ifdef CONFIG_AIOS
 int lbio_add_bh(void *_lbio, struct buffer_head *bh)
 {
 	struct lbio *lbio = (struct lbio *)_lbio;
@@ -3479,3 +3481,4 @@ int lbio_add_bh(void *_lbio, struct buffer_head *bh)
 	return 0;
 }
 EXPORT_SYMBOL(lbio_add_bh);
+#endif

@@ -44,7 +44,9 @@
 #include <linux/backing-dev.h>
 #include <linux/pagevec.h>
 #include <linux/cleancache.h>
+#ifdef CONFIG_AIOS
 #include <linux/lbio.h>
+#endif
 
 #include "ext4.h"
 
@@ -313,15 +315,6 @@ static void AIOS_mpage_end_io(struct lbio *lbio)
 		}
 		unlock_page(page);
 	}
-<<<<<<< HEAD
-=======
-
-	lbio_set_completed(lbio);
-	push_lazy_single(lbio);
-
-	if (atomic_read(&lbio->lbio_waiters))
-		wake_up(&lbio->lbio_waitqueue);
->>>>>>> 70721a85a2489683591d2143db970bfa8e6f4bab
 }
 
 int ext4_AIOS_mpage_readpages(struct address_space *mapping,

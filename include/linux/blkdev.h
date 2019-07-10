@@ -1170,7 +1170,9 @@ static inline bool blk_needs_flush_plug(struct task_struct *tsk)
 
 	return plug &&
 		 (!list_empty(&plug->mq_list) ||
+#ifdef CONFIG_AIOS
 		!list_empty(&plug->lbio_list) ||
+#endif
 		 !list_empty(&plug->cb_list));
 }
 

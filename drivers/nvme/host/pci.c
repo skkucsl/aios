@@ -35,12 +35,14 @@
 #include "trace.h"
 #include "nvme.h"
 
+#ifdef CONFIG_AIOS
 #include <linux/lbio.h>
 #define NUM_CORE num_online_cpus()
 #define DEV_INSTANCE 0
 #define NVME_AIOS 0x8000
 DEFINE_PER_CPU(struct nvme_queue *, nvme_irq_queues);
 DEFINE_PER_CPU(struct nvme_queue *, nvme_poll_queues);
+#endif
 
 #define SQ_SIZE(depth)		(depth * sizeof(struct nvme_command))
 #define CQ_SIZE(depth)		(depth * sizeof(struct nvme_completion))
@@ -1003,7 +1005,6 @@ static void lbio_write_req_completion(struct nvme_queue *queue, struct lbio *lbi
 {
 	BUG_ON(!lbio_is_busy(lbio));
 
-<<<<<<< HEAD
 	if (lbio_is_fua(lbio)) {
 		nvme_lbio_submit_cmd(lbio, 0);
 		return;
@@ -1012,15 +1013,8 @@ static void lbio_write_req_completion(struct nvme_queue *queue, struct lbio *lbi
 	dma_unmap_sg(queue->q_dmadev, (struct scatterlist *)(lbio->vec[0].dma_addr),
 													lbio->vcnt, DMA_TO_DEVICE);
 	kfree((struct scatterlist *)(lbio->vec[0].dma_addr));
-
 	lbio->bi_end_io(lbio);
 
-=======
-	AIOS_dma_unmap_sg(queue->q_dmadev, lbio->vec[0].dma_addr,
-									lbio->vcnt, DMA_TO_DEVICE);
-	lbio->bi_end_io(lbio);
-
->>>>>>> 70721a85a2489683591d2143db970bfa8e6f4bab
 	if (lbio->max_vcnt > LBIO_INLINE_VECS)
 		kfree(lbio->vec);
 
@@ -1047,7 +1041,6 @@ static inline void nvme_handle_cqe(struct nvme_queue *nvmeq, u16 idx)
 	volatile struct nvme_completion *cqe = &nvmeq->cqes[idx];
 	struct request *req;
 
-<<<<<<< HEAD
 #ifdef CONFIG_AIOS
 	if (cqe->command_id & NVME_AIOS) {
 		struct lbio *lbio = tag_to_lbio(cqe->command_id & ~NVME_AIOS);
@@ -1063,8 +1056,6 @@ static inline void nvme_handle_cqe(struct nvme_queue *nvmeq, u16 idx)
 	}
 #endif
 
-=======
->>>>>>> 70721a85a2489683591d2143db970bfa8e6f4bab
 	if (unlikely(cqe->command_id >= nvmeq->q_depth)) {
 		dev_warn(nvmeq->dev->ctrl.device,
 			"invalid id %d completed on queue %d\n",
@@ -1084,21 +1075,6 @@ static inline void nvme_handle_cqe(struct nvme_queue *nvmeq, u16 idx)
 				cqe->status, &cqe->result);
 		return;
 	}
-
-#ifdef CONFIG_AIOS
-	if (cqe->command_id & NVME_AIOS) {
-		struct lbio *lbio = tag_to_lbio(cqe->command_id & ~NVME_AIOS);
-		lbio->status = nvme_AIOS_error_status(le16_to_cpu(cqe->status) >> 1);
-		if (lbio->status)
-			printk(KERN_ERR "[AIOS ERROR] %s:%d\n", __func__, __LINE__);
-
-		if (lbio_is_write(lbio))
-			lbio_write_req_completion(nvmeq, lbio);
-		else
-			lbio_req_completion(lbio);
-		return;
-	}
-#endif
 
 	req = blk_mq_tag_to_rq(*nvmeq->tags, cqe->command_id);
 	trace_nvme_sq(req, cqe->sq_head, nvmeq->sq_tail);
@@ -2767,6 +2743,12 @@ static void nvme_reset_work(struct work_struct *work)
 	}
 
 	nvme_start_ctrl(&dev->ctrl);
+
+#ifdef CONFIG_AIOS
+	if (dev->ctrl.instance == DEV_INSTANCE)
+		init_lbio(dev->dev);
+#endif
+
 	return;
 
  out_unlock:
@@ -2942,11 +2924,6 @@ static int nvme_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	nvme_get_ctrl(&dev->ctrl);
 	async_schedule(nvme_async_probe, dev);
-
-#ifdef CONFIG_AIOS
-	if (dev->ctrl.instance == DEV_INSTANCE)
-		init_lbio(dev->dev);
-#endif
 
 	return 0;
 
@@ -3379,6 +3356,7 @@ int nvme_lbio_submit_cmd(struct lbio *lbio, int flush_fua)
 	memset(&cmd, 0, sizeof(cmd));
 
 	if (ns->ctrl->vwc && flush_fua) {
+printk(KERN_ERR "[AIOS] lbio_submit vwc??\n");
 		lbio_set_fua(lbio);
 		cmd.common.opcode = nvme_cmd_flush;
 		cmd.rw.command_id = lbio_tag(lbio) | NVME_AIOS;
@@ -3402,7 +3380,8 @@ int nvme_lbio_submit_cmd(struct lbio *lbio, int flush_fua)
 		cmd.rw.command_id = lbio_tag(lbio) | NVME_AIOS;
 		cmd.rw.nsid = cpu_to_le32(ns->head->ns_id);
 		cmd.rw.slba = cpu_to_le64(nvme_block_nr(ns, lbio->sector));
-		cmd.rw.dptr.prp1 = cpu_to_le64(cpu_to_le64(lbio->vec[0].dma_addr));
+		cmd.rw.dptr.prp1 = cpu_to_le64(cpu_to_le64(((struct scatterlist *)
+									(lbio->vec[0].dma_addr))->dma_address));
 		cmd.rw.dptr.prp2 = cpu_to_le64(0);
 		cmd.rw.length = 
 				cpu_to_le16(((lbio->vcnt * PAGE_SIZE) >> ns->lba_shift) - 1);

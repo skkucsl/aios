@@ -1,13 +1,16 @@
 #include <linux/kernel.h>
-#include <linux/lbio.h>
 #include <linux/cpumask.h>
 #include <linux/cpu.h>
 #include <linux/device.h>
 #include <linux/slab.h>
 #include <linux/pagemap.h>
+#ifdef CONFIG_AIOS
+#include <linux/lbio.h>
+#endif
 
 #include <asm/barrier.h>
 
+#ifdef CONFIG_AIOS
 struct lbio *lbios_global;
 EXPORT_SYMBOL(lbios_global);
 
@@ -311,3 +314,4 @@ int init_lbio(struct device *dev)
 	put_online_cpus();
 	return 0;
 }
+#endif

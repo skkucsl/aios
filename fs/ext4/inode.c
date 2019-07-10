@@ -40,7 +40,9 @@
 #include <linux/bitops.h>
 #include <linux/iomap.h>
 #include <linux/iversion.h>
+#ifdef CONFIG_AIOS
 #include <linux/lbio.h>
+#endif
 
 #include "ext4_jbd2.h"
 #include "xattr.h"

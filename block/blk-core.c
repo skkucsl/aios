@@ -35,7 +35,9 @@
 #include <linux/blk-cgroup.h>
 #include <linux/debugfs.h>
 #include <linux/bpf.h>
+#ifdef CONFIG_AIOS
 #include <linux/lbio.h>
+#endif
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/block.h>
@@ -1716,7 +1718,9 @@ void blk_start_plug(struct blk_plug *plug)
 		return;
 
 	INIT_LIST_HEAD(&plug->mq_list);
+#ifdef CONFIG_AIOS
 	INIT_LIST_HEAD(&plug->lbio_list);
+#endif
 	INIT_LIST_HEAD(&plug->cb_list);
 	plug->rq_count = 0;
 	plug->multiple_queues = false;

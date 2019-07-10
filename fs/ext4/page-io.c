@@ -25,7 +25,9 @@
 #include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/backing-dev.h>
+#ifdef CONFIG_AIOS
 #include <linux/lbio.h>
+#endif
 
 #include "ext4_jbd2.h"
 #include "xattr.h"
@@ -436,10 +438,6 @@ static void ext4_end_lbio(struct lbio *lbio)
 	}
 
 	if (io_end->flag & EXT4_IO_END_UNWRITTEN) {
-<<<<<<< HEAD
-=======
-		//bio->bi_private = xchg(&io_end->bio, bio);
->>>>>>> 70721a85a2489683591d2143db970bfa8e6f4bab
 		printk(KERN_ERR "[AIOS ERROR] %s:%d\n", __func__, __LINE__);
 		ext4_put_io_end_defer(io_end);
 	} else {
@@ -447,9 +445,7 @@ static void ext4_end_lbio(struct lbio *lbio)
 		ext4_finish_lbio(lbio, status);
 	}
 }
-#endif
 
-#ifdef CONFIG_AIOS
 void ext4_lbio_submit(struct ext4_io_submit *io)
 {
 	struct bio *bio = io->io_bio;

@@ -378,48 +378,6 @@ static int filemap_check_and_keep_errors(struct address_space *mapping)
 	return 0;
 }
 
-/*
-int __filemap_lbio_fdatawrite_range(struct address_space *mapping, loff_t start,
-				loff_t end, int sync_mode)
-{
-	int ret;
-	struct writeback_control wbc = {
-		.sync_mode = sync_mode,
-		.nr_to_write = LONG_MAX,
-		.range_start = start,
-		.range_end = end,
-	};
-
-	if (!mapping_cap_writeback_dirty(mapping))
-		return 0;
-
-	wbc_attach_fdatawrite_inode(&wbc, mapping->host);
-	//ret = do_writepages(mapping, &wbc);
-	if (wbc.nr_to_write <= 0)
-		return 0;
-	while (1) {
-		//if (atomic_read(&mapping->host->aios_count)) {
-		//	if (mapping->a_ops->lbio_writepages) {
-		//		ret = mapping->a_ops->writepages(mapping, wbc);
-		//		goto lbio_writepages_ok;
-		//	}
-		//}
-
-		if (mapping->a_ops->lbio_writepages)
-			ret = mapping->a_ops->lbio_writepages(mapping, &wbc);
-		else
-			ret = generic_writepages(mapping, &wbc);
-//lbio_writepages_ok:
-		if ((ret != -ENOMEM) || (wbc.sync_mode != WB_SYNC_ALL))
-			break;
-		cond_resched();
-		congestion_wait(BLK_RW_ASYNC, HZ/50);
-	}
-	wbc_detach_inode(&wbc);
-	return ret;
-}
-*/
-
 /**
  * __filemap_fdatawrite_range - start writeback on mapping dirty pages in range
  * @mapping:	address space structure to write
