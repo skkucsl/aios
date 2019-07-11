@@ -1006,7 +1006,7 @@ static void lbio_write_req_completion(struct nvme_queue *queue, struct lbio *lbi
 	BUG_ON(!lbio_is_busy(lbio));
 
 	if (lbio_is_fua(lbio)) {
-		nvme_lbio_submit_cmd(lbio, 0);
+		nvme_lbio_submit_commit_record(lbio, 0);
 		return;
 	}
 
@@ -3348,7 +3348,7 @@ abort_remaining_lbios:
 }
 EXPORT_SYMBOL_GPL(nvme_AIOS_write);
 
-int nvme_lbio_submit_cmd(struct lbio *lbio, int flush_fua)
+int nvme_lbio_submit_commit_record(struct lbio *lbio, int flush_fua)
 {
 	struct nvme_queue *nvmeq = get_cpu_var(nvme_irq_queues);
 	struct nvme_ns *ns = list_entry(nvmeq->dev->ctrl.namespaces.next, struct nvme_ns, list);
@@ -3380,8 +3380,8 @@ printk(KERN_ERR "[AIOS] lbio_submit vwc??\n");
 		cmd.rw.command_id = lbio_tag(lbio) | NVME_AIOS;
 		cmd.rw.nsid = cpu_to_le32(ns->head->ns_id);
 		cmd.rw.slba = cpu_to_le64(nvme_block_nr(ns, lbio->sector));
-		cmd.rw.dptr.prp1 = cpu_to_le64(cpu_to_le64(((struct scatterlist *)
-									(lbio->vec[0].dma_addr))->dma_address));
+		cmd.rw.dptr.prp1 = cpu_to_le64(((struct scatterlist *)
+									(lbio->vec[0].dma_addr))->dma_address);
 		cmd.rw.dptr.prp2 = cpu_to_le64(0);
 		cmd.rw.length = 
 				cpu_to_le16(((lbio->vcnt * PAGE_SIZE) >> ns->lba_shift) - 1);
@@ -3409,7 +3409,7 @@ flush_command:
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(nvme_lbio_submit_cmd);
+EXPORT_SYMBOL_GPL(nvme_lbio_submit_commit_record);
 
 int nvme_lbio_dma_mapping(struct lbio *lbio)
 {

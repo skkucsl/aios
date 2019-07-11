@@ -1013,7 +1013,7 @@ new_lbio:
 	if (!jbd2_has_feature_async_commit(journal)) {
 #ifdef CONFIG_AIOS
 		if (commit_transaction->aios)
-			err = nvme_lbio_submit_cmd(lbio, REQ_PREFLUSH | REQ_FUA);
+			err = nvme_lbio_submit_commit_record(lbio, REQ_PREFLUSH | REQ_FUA);
 		else
 			err = journal_submit_commit_record(journal, commit_transaction,
 						&cbh, crc32_sum);
