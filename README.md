@@ -11,5 +11,5 @@ This is the source code repository for the paper entitled "Asynchronous I/O Stac
 ## Warning
 
 * The source code is not tested with SSDs having a volatile write cache. All tested NVMe SSDs have the non-volatile write cache feature.
-* The current implementation supports only one NVMe SSD at a time. If you have multiple NVMe SSDs, the `DEV_INSTANCE` in `drivers/nvme/host/pci.c` should be properly adjusted to specify an NVMe SSD you want to apply AIOS to.
+* The current implementation supports only one NVMe SSD at a time. If you have multiple NVMe SSDs, the macro `DEV_INSTANCE` in `drivers/nvme/host/pci.c` should be properly adjusted to specify an NVMe SSD you want to apply AIOS to.
 * The current implementation does not support the `mmap()` path. 
