@@ -3356,7 +3356,6 @@ int nvme_lbio_submit_commit_record(struct lbio *lbio, int flush_fua)
 	memset(&cmd, 0, sizeof(cmd));
 
 	if (ns->ctrl->vwc && flush_fua) {
-printk(KERN_ERR "[AIOS] lbio_submit vwc??\n");
 		lbio_set_fua(lbio);
 		cmd.common.opcode = nvme_cmd_flush;
 		cmd.rw.command_id = lbio_tag(lbio) | NVME_AIOS;

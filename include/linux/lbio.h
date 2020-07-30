@@ -207,8 +207,8 @@ extern void exit_lbio(void);
 extern int nvme_AIOS_poll(struct lbio *lbio, void *ret_nvmeq, int count);
 extern int nvme_AIOS_read(struct lbio *lbio);
 extern int nvme_AIOS_write(struct lbio *lbio);
-extern int nvme_lbio_submit_cmd(struct lbio *lbio, int flush_fua);
 extern int nvme_lbio_dma_mapping(struct lbio *lbio);
+extern int nvme_lbio_submit_commit_record(struct lbio *lbio, int flush_fua);
 
 extern void lbio_req_completion_error(struct lbio *lbio);
 
