@@ -4,7 +4,8 @@ This is the source code repository for the paper entitled "Asynchronous I/O Stac
 
 ## How to use
 
-* Enable `CONFIG_AIOS` and `CONFIG_INTEL_IOMMU`.
+* Enable `CONFIG_AIOS` and `CONFIG_INTEL_IOMMU` (set to y).
+* Enable `CONFIG_NVME_CORE` and `CONFIG_BLK_DEV_NVME` (set to y, not module).
 * Open a file using a `O_AIOS` or `040000000` flag. The file should be located in Ext4 file system and in an NVMe SSD.
 * Access the file using `read(), pread(), write(), pwrite(), fsync() and fdatasync()`.
 
